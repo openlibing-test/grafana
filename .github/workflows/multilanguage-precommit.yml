@@ -8,6 +8,11 @@ name: Multilanguage pre-commit
 #     branches: ['codex/grafana-eslint-validation']
 on:
   workflow_dispatch:
+    inputs:
+      tool:
+        type: choice
+        default: all
+        options: [all, eslint, gosec]
 permissions:
   contents: read
 jobs:
