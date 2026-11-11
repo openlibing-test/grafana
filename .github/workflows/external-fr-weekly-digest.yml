@@ -5,10 +5,24 @@ name: External FR Weekly Digest
 # ./community-triage/, and runs the digest from there. The consumer repo source
 # is mounted into the Oz container as /repo; config is resolved at the root.
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   schedule:
+#     # Run every Monday at 9:00 AM UTC
+#     - cron: '0 9 * * 1'
+#   workflow_dispatch:
+#     inputs:
+#       dry_run:
+#         description: 'Dry run (skip Slack notifications)'
+#         required: false
+#         default: false
+#         type: boolean
+#       team_filter:
+#         description: 'Filter to specific team (leave empty for all enabled teams)'
+#         required: false
+#         default: ''
+#         type: string
 on:
-  schedule:
-    # Run every Monday at 9:00 AM UTC
-    - cron: '0 9 * * 1'
   workflow_dispatch:
     inputs:
       dry_run:

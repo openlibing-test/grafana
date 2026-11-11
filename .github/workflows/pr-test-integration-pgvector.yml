@@ -1,27 +1,30 @@
 name: Integration Tests (pgvector)
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   push:
+#     branches:
+#       - main
+#       - release-*.*.*
+#   pull_request:
+#     types:
+#       - opened
+#       - synchronize
+#       - reopened
+#     paths:
+#       - Makefile
+#       - '**/go.mod'
+#       - '**/go.sum'
+#       - '**/go.work'
+#       - '**/go.work.sum'
+#       - pkg/storage/unified/search/vector/**
+#       - pkg/storage/unified/search/embed/**
+#       - devenv/docker/blocks/pgvector/**
+#       - devenv/.env
+#       - .github/actions/setup-go/**
+#       - .github/workflows/pr-test-integration-pgvector.yml
 on:
-  push:
-    branches:
-      - main
-      - release-*.*.*
-  pull_request:
-    types:
-      - opened
-      - synchronize
-      - reopened
-    paths:
-      - Makefile
-      - '**/go.mod'
-      - '**/go.sum'
-      - '**/go.work'
-      - '**/go.work.sum'
-      - pkg/storage/unified/search/vector/**
-      - pkg/storage/unified/search/embed/**
-      - devenv/docker/blocks/pgvector/**
-      - devenv/.env
-      - .github/actions/setup-go/**
-      - .github/workflows/pr-test-integration-pgvector.yml
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

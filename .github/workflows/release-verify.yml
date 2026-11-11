@@ -1,17 +1,20 @@
 name: Verify release tar.gz
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   workflow_call:
+#     inputs:
+#       run-id:
+#         description: Run ID where the target artifact was produced
+#         required: true
+#         type: string
+#       targz-artifact-name:
+#         description: Name of the uploaded targz artifact bundle
+#         required: false
+#         type: string
+#         default: artifacts-targz-linux-amd64
 on:
-  workflow_call:
-    inputs:
-      run-id:
-        description: Run ID where the target artifact was produced
-        required: true
-        type: string
-      targz-artifact-name:
-        description: Name of the uploaded targz artifact bundle
-        required: false
-        type: string
-        default: artifacts-targz-linux-amd64
+  workflow_dispatch:
 
 permissions:
   contents: read

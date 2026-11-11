@@ -1,29 +1,32 @@
 name: Integration Tests
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   push:
+#     branches:
+#       - main
+#       - release-*.*.*
+#   pull_request:
+#     types:
+#       - opened
+#       - synchronize
+#       - reopened
+#     paths:
+#       - Makefile
+#       - '**/go.mod'
+#       - '**/go.sum'
+#       - '**/go.work'
+#       - '**/go.work.sum'
+#       - '**.go'
+#       - pkg/**
+#       - apps/**
+#       - scripts/ci/backend-tests/**
+#       - devenv/**
+#       - .github/actions/setup-go/**
+#       - .github/actions/setup-enterprise/**
+#       - .github/workflows/pr-test-integration.yml
 on:
-  push:
-    branches:
-      - main
-      - release-*.*.*
-  pull_request:
-    types:
-      - opened
-      - synchronize
-      - reopened
-    paths:
-      - Makefile
-      - '**/go.mod'
-      - '**/go.sum'
-      - '**/go.work'
-      - '**/go.work.sum'
-      - '**.go'
-      - pkg/**
-      - apps/**
-      - scripts/ci/backend-tests/**
-      - devenv/**
-      - .github/actions/setup-go/**
-      - .github/actions/setup-enterprise/**
-      - .github/workflows/pr-test-integration.yml
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

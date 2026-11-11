@@ -1,12 +1,15 @@
 name: Dashboard Re-embedding Approval
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   pull_request:
+#     types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+#     branches: [main]
+#     paths:
+#       - pkg/storage/unified/search/embed/dashboard/extractor.go
+#       - .github/workflows/pr-reembed-version-approval.yml
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
-    branches: [main]
-    paths:
-      - pkg/storage/unified/search/embed/dashboard/extractor.go
-      - .github/workflows/pr-reembed-version-approval.yml
+  workflow_dispatch:
 
 permissions:
   contents: read

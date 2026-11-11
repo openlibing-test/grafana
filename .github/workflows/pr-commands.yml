@@ -1,10 +1,13 @@
 name: PR automation
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   pull_request_target:  # zizmor: ignore[dangerous-triggers] action uses GITHUB_TOKEN only, does not check out fork code
+#     types:
+#       - labeled
+#       - opened
+#       - synchronize
 on:
-  pull_request_target:  # zizmor: ignore[dangerous-triggers] action uses GITHUB_TOKEN only, does not check out fork code
-    types:
-      - labeled
-      - opened
-      - synchronize
+  workflow_dispatch:
 
 concurrency:
   group: pr-commands-${{ github.event.number }}

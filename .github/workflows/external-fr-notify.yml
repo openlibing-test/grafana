@@ -5,9 +5,12 @@ name: External FR Notify
 # ./community-triage/, and runs the scripts from there. Config
 # (team-notifications-config.json) is resolved at this repo's root.
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   issues:
+#     types: [labeled, typed]
 on:
-  issues:
-    types: [labeled, typed]
+  workflow_dispatch:
 
 permissions: {}
 

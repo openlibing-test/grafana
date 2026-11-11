@@ -1,9 +1,12 @@
 name: "Endpoint Migration Feature Toggle Check"
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   pull_request:
+#     types: [opened, synchronize, reopened, labeled, unlabeled]
+#     branches: [main]
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
-    branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

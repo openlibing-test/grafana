@@ -6,11 +6,14 @@ name: Renovate approve
 # creating the PR, and a check cancelled by a runner eviction never fires a new
 # event to retry. It also keeps the approving token out of PR-triggered runs:
 # the token grant is pinned to main, so a workflow edit on a branch mints nothing.
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   schedule:
+#     # Every 30 minutes, Monday 00:00 to Friday 23:59 UTC. Offset from :00/:30,
+#     # where GitHub's scheduler is busiest and delays or drops runs.
+#     - cron: '15,45 * * * 1-5'
+#   workflow_dispatch:
 on:
-  schedule:
-    # Every 30 minutes, Monday 00:00 to Friday 23:59 UTC. Offset from :00/:30,
-    # where GitHub's scheduler is busiest and delays or drops runs.
-    - cron: '15,45 * * * 1-5'
   workflow_dispatch:
 
 permissions: {}

@@ -1,10 +1,13 @@
 name: Deploy Storybook preview
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   pull_request:
+#     paths:
+#       - 'packages/grafana-ui/**'
+#       - 'packages/grafana-data/src/themes/**'
 on:
-  pull_request:
-    paths:
-      - 'packages/grafana-ui/**'
-      - 'packages/grafana-data/src/themes/**'
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

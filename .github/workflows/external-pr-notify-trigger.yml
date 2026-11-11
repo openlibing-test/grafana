@@ -1,9 +1,12 @@
 name: External PR Notify Trigger
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   pull_request_target:  # zizmor: ignore[dangerous-triggers]
+#     # Fire when an external PR is opened or a draft is marked ready for review.
+#     types: [opened, ready_for_review]
 on:
-  pull_request_target:  # zizmor: ignore[dangerous-triggers]
-    # Fire when an external PR is opened or a draft is marked ready for review.
-    types: [opened, ready_for_review]
+  workflow_dispatch:
 
 permissions:
   contents: read

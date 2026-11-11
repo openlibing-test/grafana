@@ -1,11 +1,14 @@
 name: Backend Unit Tests
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   pull_request:
+#   push:
+#     branches:
+#       - main
+#       - release-*.*.*
 on:
-  pull_request:
-  push:
-    branches:
-      - main
-      - release-*.*.*
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

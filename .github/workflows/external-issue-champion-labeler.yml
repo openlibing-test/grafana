@@ -1,8 +1,11 @@
 name: Label community champion issues
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   issues:
+#     types: [opened]
 on:
-  issues:
-    types: [opened]
+  workflow_dispatch:
 
 permissions: {}
 

@@ -1,11 +1,14 @@
 name: Swagger generated code
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   push:
+#     branches:
+#       - main
+#       - release-*
+#   pull_request:
 on:
-  push:
-    branches:
-      - main
-      - release-*
-  pull_request:
+  workflow_dispatch:
 
 permissions: {}
 

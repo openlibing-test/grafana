@@ -1,20 +1,23 @@
 name: Documentation
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   pull_request:
+#     paths:
+#       - '*.md'
+#       - 'docs/**'
+#       - 'packages/**/*.md'
+#       - 'latest.json'
+#   push:
+#     branches:
+#       - main
+#     paths:
+#       - '*.md'
+#       - 'docs/**'
+#       - 'packages/**/*.md'
+#       - 'latest.json'
 on:
-  pull_request:
-    paths:
-      - '*.md'
-      - 'docs/**'
-      - 'packages/**/*.md'
-      - 'latest.json'
-  push:
-    branches:
-      - main
-    paths:
-      - '*.md'
-      - 'docs/**'
-      - 'packages/**/*.md'
-      - 'latest.json'
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

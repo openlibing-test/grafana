@@ -1,14 +1,17 @@
 name: Crowdin Upload Action
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   workflow_dispatch:
+#   push:
+#     paths:
+#       - 'public/locales/en-US/grafana.json'
+#       - 'packages/grafana-sql/src/locales/en-US/grafana-sql.json'
+#       - 'apps/advisor/pkg/translations/en-US/grafana-advisor.json'
+#     branches:
+#       - main
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - 'public/locales/en-US/grafana.json'
-      - 'packages/grafana-sql/src/locales/en-US/grafana-sql.json'
-      - 'apps/advisor/pkg/translations/en-US/grafana-advisor.json'
-    branches:
-      - main
 
 jobs:
   upload-sources-to-crowdin:

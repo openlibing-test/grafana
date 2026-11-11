@@ -2,16 +2,19 @@
 # or whose generated Go code doesn't match its .proto files.
 name: Protobuf checks
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   pull_request:
+#     # Recheck when the exception label is added or removed.
+#     types: [opened, synchronize, reopened, labeled, unlabeled]
+#     paths:
+#       - 'pkg/registry/apps/annotation/proto/**'
+#       - 'pkg/storage/unified/proto/**'
+#       - 'pkg/storage/unified/resourcepb/**'
+#       - 'pkg/storage/dbproxy/**'
+#       - '.github/workflows/proto-breaking-changes.yml'
 on:
-  pull_request:
-    # Recheck when the exception label is added or removed.
-    types: [opened, synchronize, reopened, labeled, unlabeled]
-    paths:
-      - 'pkg/registry/apps/annotation/proto/**'
-      - 'pkg/storage/unified/proto/**'
-      - 'pkg/storage/unified/resourcepb/**'
-      - 'pkg/storage/dbproxy/**'
-      - '.github/workflows/proto-breaking-changes.yml'
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

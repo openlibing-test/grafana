@@ -1,13 +1,16 @@
 name: Deploy pr preview
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   pull_request:
+#     types:
+#       - opened
+#       - synchronize
+#       - closed
+#     paths:
+#       - "docs/sources/**"
 on:
-  pull_request:
-    types:
-      - opened
-      - synchronize
-      - closed
-    paths:
-      - "docs/sources/**"
+  workflow_dispatch:
 
 permissions: {}
 

@@ -1,25 +1,28 @@
 name: Verify release packages
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   workflow_call:
+#     inputs:
+#       run-id:
+#         description: Run ID where package artifacts were produced
+#         required: true
+#         type: string
+#       packages-artifact-name:
+#         description: Name of the artifact containing deb/rpm packages
+#         required: false
+#         type: string
+#         default: artifacts-linux-amd64
+#       docker-artifact-name:
+#         description: Name of the artifact containing the alpine docker image. Defaults to packages-artifact-name.
+#         required: false
+#         type: string
+#       docker-ubuntu-artifact-name:
+#         description: Name of the artifact containing the ubuntu docker image. Defaults to docker-artifact-name.
+#         required: false
+#         type: string
 on:
-  workflow_call:
-    inputs:
-      run-id:
-        description: Run ID where package artifacts were produced
-        required: true
-        type: string
-      packages-artifact-name:
-        description: Name of the artifact containing deb/rpm packages
-        required: false
-        type: string
-        default: artifacts-linux-amd64
-      docker-artifact-name:
-        description: Name of the artifact containing the alpine docker image. Defaults to packages-artifact-name.
-        required: false
-        type: string
-      docker-ubuntu-artifact-name:
-        description: Name of the artifact containing the ubuntu docker image. Defaults to docker-artifact-name.
-        required: false
-        type: string
+  workflow_dispatch:
 
 permissions:
   contents: read
