@@ -1,0 +1,17 @@
+{
+  "name": "eslint-full-scan-demo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ESLint full scan demo repo for openLiBing GitHub Actions onboarding",
+  "scripts": {
+    "lint": "eslint src/"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.10.0",
+    "@microsoft/eslint-formatter-sarif": "3.1.0",
+    "eslint": "9.10.0",
+    "globals": "^17.14.0",
+    "typescript": "5.4.5",
+    "typescript-eslint": "8.1.0"
+  }
+}
