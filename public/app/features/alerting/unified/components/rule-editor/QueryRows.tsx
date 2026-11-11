@@ -1,0 +1,405 @@
+import { DragDropContext, type DropResult, Droppable } from '@hello-pangea/dnd';
+import { omit } from 'lodash';
+import { useState } from 'react';
+import { useAsync } from 'react-use';
+
+import {
+  type DataSourceInstanceSettings,
+  LoadingState,
+  type PanelData,
+  type RelativeTimeRange,
+  getDataSourceRef,
+  rangeUtil,
+} from '@grafana/data';
+import { Trans } from '@grafana/i18n';
+import {
+  getDataSourceInstanceList,
+  getDataSourceInstanceSettings,
+  getDefaultDataSourceInstanceListItem,
+  useDataSourceInstanceSettings,
+} from '@grafana/runtime';
+import { type DataQuery } from '@grafana/schema';
+import { Button, Card, Icon, Stack } from '@grafana/ui';
+import { QueryOperationRow } from 'app/core/components/QueryOperationRow/QueryOperationRow';
+import { isExpressionQuery } from 'app/features/expressions/guards';
+import { type AlertDataQuery, type AlertQuery } from 'app/types/unified-alerting-dto';
+
+import { useSlowQuery } from '../../hooks/useSlowQuery';
+import { getInstantFromDataQuery } from '../../utils/rule-form';
+
+import {
+  type AlertQueryOptions,
+  EmptyQueryWrapper,
+  QUERY_ROW_LOADING_INDICATOR_DELAY_MS,
+  QueryRowSkeleton,
+  QueryWrapper,
+} from './QueryWrapper';
+import {
+  type ThresholdDefinition,
+  errorFromCurrentCondition,
+  errorFromPreviewData,
+  getThresholdsForQueries,
+} from './util';
+
+interface Props {
+  // The query configuration
+  queries: AlertQuery[];
+  expressions: AlertQuery[];
+  data: Record<string, PanelData>;
+  onRunQueries: () => void;
+
+  // Query editing
+  onQueriesChange: (queries: AlertQuery[]) => void;
+  onDuplicateQuery: (query: AlertQuery) => void;
+  condition: string | null;
+  onSetCondition: (refId: string) => void;
+}
+
+export const QueryRows = ({
+  queries,
+  expressions,
+  data,
+  onRunQueries,
+  onQueriesChange,
+  onDuplicateQuery,
+  condition,
+  onSetCondition,
+}: Props) => {
+  const onRemoveQuery = (query: DataQuery) => {
+    onQueriesChange(queries.filter((q) => q.refId !== query.refId));
+  };
+
+  const onChangeTimeRange = (timeRange: RelativeTimeRange, index: number) => {
+    onQueriesChange(
+      queries.map((item, itemIndex) => {
+        if (itemIndex !== index) {
+          return item;
+        }
+        return {
+          ...item,
+          relativeTimeRange: timeRange,
+        };
+      })
+    );
+  };
+
+  const onChangeQueryOptions = (options: AlertQueryOptions, index: number) => {
+    onQueriesChange(
+      queries.map((item, itemIndex) => {
+        if (itemIndex !== index) {
+          return item;
+        }
+        return {
+          ...item,
+          model: {
+            ...item.model,
+            maxDataPoints: options.maxDataPoints,
+            intervalMs: options.minInterval ? rangeUtil.intervalToMs(options.minInterval) : undefined,
+          },
+        };
+      })
+    );
+  };
+
+  const onChangeDataSource = (
+    nextSettings: DataSourceInstanceSettings,
+    previousSettings: DataSourceInstanceSettings | undefined,
+    index: number
+  ) => {
+    const updatedQueries = queries.map((item, itemIndex) => {
+      if (itemIndex !== index) {
+        return item;
+      }
+
+      // Copy model if changing to a datasource of same type.
+      if (nextSettings.type === previousSettings?.type) {
+        return copyModel(item, nextSettings);
+      }
+      return newModel(item, nextSettings);
+    });
+
+    onQueriesChange(updatedQueries);
+  };
+
+  const onChangeQuery = (query: DataQuery, index: number) => {
+    onQueriesChange(
+      queries.map((item, itemIndex) => {
+        if (itemIndex !== index) {
+          return item;
+        }
+
+        return {
+          ...item,
+          refId: query.refId,
+          queryType: item.model.queryType ?? '',
+          model: {
+            ...item.model,
+            ...query,
+            datasource: query.datasource!,
+          },
+        };
+      })
+    );
+  };
+
+  const onDragEnd = (result: DropResult) => {
+    if (!result || !result.destination) {
+      return;
+    }
+
+    const startIndex = result.source.index;
+    const endIndex = result.destination.index;
+    if (startIndex === endIndex) {
+      return;
+    }
+
+    const update = Array.from(queries);
+    const [removed] = update.splice(startIndex, 1);
+    update.splice(endIndex, 0, removed);
+    onQueriesChange(update);
+  };
+
+  const thresholdByRefId = getThresholdsForQueries([...queries, ...expressions], condition);
+
+  return (
+    <DragDropContext onDragEnd={onDragEnd}>
+      <Droppable droppableId="alerting-queries" direction="vertical">
+        {(provided) => {
+          return (
+            <div ref={provided.innerRef} {...provided.droppableProps}>
+              <Stack direction="column">
+                {queries.map((query, index) => (
+                  <QueryRowItem
+                    key={query.refId}
+                    query={query}
+                    index={index}
+                    queries={[...queries, ...expressions]}
+                    data={data?.[query.refId] ?? { series: [], state: LoadingState.NotStarted }}
+                    condition={condition}
+                    threshold={thresholdByRefId[query.refId]}
+                    onChangeQuery={onChangeQuery}
+                    onRemoveQuery={onRemoveQuery}
+                    onChangeDataSource={onChangeDataSource}
+                    onDuplicateQuery={onDuplicateQuery}
+                    onChangeTimeRange={onChangeTimeRange}
+                    onChangeQueryOptions={onChangeQueryOptions}
+                    onRunQueries={onRunQueries}
+                    onSetCondition={onSetCondition}
+                  />
+                ))}
+                {provided.placeholder}
+              </Stack>
+            </div>
+          );
+        }}
+      </Droppable>
+    </DragDropContext>
+  );
+};
+
+interface QueryRowItemProps {
+  query: AlertQuery;
+  index: number;
+  queries: AlertQuery[];
+  data: PanelData;
+  condition: string | null;
+  threshold?: ThresholdDefinition;
+  onChangeQuery: (query: DataQuery, index: number) => void;
+  onRemoveQuery: (query: DataQuery) => void;
+  onChangeDataSource: (
+    nextSettings: DataSourceInstanceSettings,
+    previousSettings: DataSourceInstanceSettings | undefined,
+    index: number
+  ) => void;
+  onDuplicateQuery: (query: AlertQuery) => void;
+  onChangeTimeRange: (timeRange: RelativeTimeRange, index: number) => void;
+  onChangeQueryOptions: (options: AlertQueryOptions, index: number) => void;
+  onRunQueries: () => void;
+  onSetCondition: (refId: string) => void;
+}
+
+const QueryRowItem = ({
+  query,
+  index,
+  queries,
+  data,
+  condition,
+  threshold,
+  onChangeQuery,
+  onRemoveQuery,
+  onChangeDataSource,
+  onDuplicateQuery,
+  onChangeTimeRange,
+  onChangeQueryOptions,
+  onRunQueries,
+  onSetCondition,
+}: QueryRowItemProps) => {
+  const { settings, isLoading } = useDataSourceInstanceSettings(query.datasourceUid);
+  const [loadedDataSourceUid, setLoadedDataSourceUid] = useState<string>();
+
+  // The hook keeps the settings of the old datasourceUid for one render after it changes
+  const isLoadingSettings = isLoading || (settings !== undefined && settings.uid !== query.datasourceUid);
+  // One timer for both phases, so the loading indicator does not drop out when the plugin starts to load
+  const isLoadingRow = isLoadingSettings || (settings !== undefined && loadedDataSourceUid !== query.datasourceUid);
+  const isSlow = useSlowQuery(isLoadingRow, { threshold: QUERY_ROW_LOADING_INDICATOR_DELAY_MS });
+  const showLoadingIndicator = isLoadingRow && isSlow;
+
+  if (isLoadingSettings) {
+    return showLoadingIndicator ? (
+      <EmptyQueryWrapper>
+        <QueryRowSkeleton />
+      </EmptyQueryWrapper>
+    ) : null;
+  }
+
+  if (!settings) {
+    return (
+      <DatasourceNotFound
+        index={index}
+        model={query.model}
+        onUpdateDatasource={(nextSettings) => onChangeDataSource(nextSettings, undefined, index)}
+        onRemoveQuery={() => onRemoveQuery(query)}
+      />
+    );
+  }
+
+  const isCondition = condition === query.refId;
+  const error = isCondition ? errorFromCurrentCondition(data) : errorFromPreviewData(data);
+
+  return (
+    <QueryWrapper
+      index={index}
+      dsSettings={settings}
+      data={data}
+      error={error}
+      query={query}
+      onChangeQuery={onChangeQuery}
+      onRemoveQuery={onRemoveQuery}
+      queries={queries}
+      onChangeDataSource={(nextSettings, index) => onChangeDataSource(nextSettings, settings, index)}
+      onDuplicateQuery={onDuplicateQuery}
+      onChangeTimeRange={onChangeTimeRange}
+      onChangeQueryOptions={onChangeQueryOptions}
+      thresholds={threshold?.config}
+      thresholdsType={threshold?.mode}
+      onRunQueries={onRunQueries}
+      condition={condition}
+      onSetCondition={onSetCondition}
+      onDataSourceLoaded={() => setLoadedDataSourceUid(query.datasourceUid)}
+      showLoadingIndicator={showLoadingIndicator}
+    />
+  );
+};
+
+function copyModel(item: AlertQuery, settings: DataSourceInstanceSettings): Omit<AlertQuery, 'datasource'> {
+  return {
+    ...item,
+    model: {
+      ...omit(item.model, 'datasource'),
+      datasource: getDataSourceRef(settings),
+    },
+    datasourceUid: settings.uid,
+  };
+}
+
+function newModel(item: AlertQuery, settings: DataSourceInstanceSettings): Omit<AlertQuery, 'datasource'> {
+  const isExpression = isExpressionQuery(item);
+  const isInstant = isExpression ? false : getInstantFromDataQuery(item);
+
+  const newQuery: Omit<AlertQuery<AlertDataQuery>, 'datasource'> = {
+    refId: item.refId,
+    relativeTimeRange: item.relativeTimeRange,
+    queryType: '',
+    datasourceUid: settings.uid,
+    model: {
+      refId: item.refId,
+      hide: false,
+      datasource: getDataSourceRef(settings),
+    },
+  };
+
+  if (isInstant && !isExpressionQuery(item)) {
+    newQuery.model.instant = isInstant;
+  }
+
+  return newQuery;
+}
+
+interface DatasourceNotFoundProps {
+  index: number;
+  model: AlertDataQuery;
+  onUpdateDatasource: (settings: DataSourceInstanceSettings) => void;
+  onRemoveQuery: () => void;
+}
+
+// Same rule as adding a new query: the org default if it supports alerting, else the first data source that does.
+async function getDefaultOrFirstAlertingDataSource(): Promise<DataSourceInstanceSettings | undefined> {
+  const items = await getDataSourceInstanceList({ alerting: true });
+  const item = (await getDefaultDataSourceInstanceListItem(items)) ?? items[0];
+  return item ? getDataSourceInstanceSettings(item.uid) : undefined;
+}
+
+const DatasourceNotFound = ({ index, onUpdateDatasource, onRemoveQuery, model }: DatasourceNotFoundProps) => {
+  const refId = model.refId;
+
+  const [showDetails, setShowDetails] = useState<boolean>(false);
+  const { value: fallbackDataSource } = useAsync(getDefaultOrFirstAlertingDataSource, []);
+
+  const toggleDetails = () => {
+    setShowDetails((show) => !show);
+  };
+
+  const handleUpdateDatasource = () => {
+    if (fallbackDataSource) {
+      onUpdateDatasource(fallbackDataSource);
+    }
+  };
+
+  return (
+    <EmptyQueryWrapper>
+      <QueryOperationRow title={refId} draggable index={index} id={refId} isOpen collapsable={false}>
+        <Card noMargin>
+          <Card.Heading>
+            <Trans i18nKey="alerting.datasource-not-found.this-datasource-has-been-removed">
+              This datasource has been removed
+            </Trans>
+          </Card.Heading>
+          <Card.Description>
+            <Trans i18nKey="alerting.datasource-not-found.card-description">
+              The datasource for this query was not found, it was either removed or is not installed correctly.
+            </Trans>
+          </Card.Description>
+          <Card.Figure>
+            <Icon name="question-circle" />
+          </Card.Figure>
+          <Card.Actions>
+            <Button key="update" variant="secondary" onClick={handleUpdateDatasource} disabled={!fallbackDataSource}>
+              <Trans i18nKey="alerting.datasource-not-found.update-datasource">Update datasource</Trans>
+            </Button>
+            <Button key="remove" variant="destructive" onClick={onRemoveQuery}>
+              <Trans i18nKey="alerting.datasource-not-found.remove-query">Remove query</Trans>
+            </Button>
+          </Card.Actions>
+          <Card.SecondaryActions>
+            <Button
+              key="details"
+              onClick={toggleDetails}
+              icon={showDetails ? 'angle-up' : 'angle-down'}
+              fill="text"
+              size="sm"
+            >
+              <Trans i18nKey="alerting.datasource-not-found.show-details">Show details</Trans>
+            </Button>
+          </Card.SecondaryActions>
+        </Card>
+        {showDetails && (
+          <div>
+            <pre>
+              <code>{JSON.stringify(model, null, 2)}</code>
+            </pre>
+          </div>
+        )}
+      </QueryOperationRow>
+    </EmptyQueryWrapper>
+  );
+};

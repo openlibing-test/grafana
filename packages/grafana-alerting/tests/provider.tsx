@@ -1,0 +1,55 @@
+import { configureStore } from '@reduxjs/toolkit';
+import { useEffect } from 'react';
+import { Provider } from 'react-redux';
+
+import { MockBackendSrv } from '@grafana/api-clients';
+import { setBackendSrv } from '@grafana/runtime';
+
+import { notificationsAPI } from '../src/grafana/api/notifications';
+import { alertingAPIMiddleware, alertingAPIReducers } from '../src/grafana/api/store';
+
+// Initialize BackendSrv for tests - this allows RTKQ to make HTTP requests
+// The actual HTTP requests will be intercepted by MSW (setupMockServer)
+// We only need to implement fetch() which is what RTKQ uses
+// we could remove this once @grafana/api-client no longer uses the BackendSrv
+// @ts-ignore
+setBackendSrv(new MockBackendSrv());
+
+// create an empty store
+export const store: ReturnType<typeof configureStore> = configureStore({
+  middleware: (getDefaultMiddleware) =>
+    getDefaultMiddleware({
+      // Disable performance-heavy middleware checks in tests
+      serializableCheck: false,
+      immutableCheck: false,
+    }).concat(alertingAPIMiddleware),
+  reducer: alertingAPIReducers,
+});
+
+/**
+ * Get a wrapper component that implements all of the providers that components
+ * within the app will need
+ */
+export const getDefaultWrapper = () => {
+  /**
+   * Returns a wrapper that should (eventually?) match the main `AppWrapper`, so any tests are rendering
+   * in mostly the same providers as a "real" hierarchy
+   */
+  return function Wrapper({ children }: React.PropsWithChildren) {
+    useResetQueryCacheAfterUnmount();
+    return <Provider store={store}>{children}</Provider>;
+  };
+};
+
+/**
+ * Whenever the test wrapper unmounts, we also want to clear the RTKQ cache entirely.
+ * if we don't then we won't be able to test components / stories with different responses for the same endpoint since
+ * the responses will be cached between renders / components / stories.
+ */
+function useResetQueryCacheAfterUnmount() {
+  useEffect(() => {
+    return () => {
+      store.dispatch(notificationsAPI.util.resetApiState());
+    };
+  }, []);
+}

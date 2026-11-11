@@ -1,0 +1,524 @@
+import { css } from '@emotion/css';
+import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom-v5-compat';
+import { useAsync } from 'react-use';
+
+import { type GrafanaTheme2 } from '@grafana/data';
+import { Trans, t } from '@grafana/i18n';
+import {
+  AdHocFiltersVariable,
+  EmbeddedScene,
+  GroupByVariable,
+  QueryVariable,
+  SceneFlexLayout,
+  SceneTimeRange,
+  type SceneVariable,
+  SceneVariableSet,
+} from '@grafana/scenes';
+import { Alert, Button, ConfirmModal, Field, Spinner, Stack, useStyles2 } from '@grafana/ui';
+import {
+  useCreateVariableMutation,
+  useDeleteVariableMutation,
+  useUpdateVariableMutation,
+  type Variable,
+} from 'app/api/clients/dashboard/v2beta1';
+import { useGetCombinedFolderQuery } from 'app/api/clients/folder/v1beta1/hooks';
+import { FolderPicker } from 'app/core/components/Select/FolderPicker';
+import { createSuccessNotification } from 'app/core/copy/appNotification';
+import { notifyApp } from 'app/core/reducers/appNotification';
+import { contextSrv } from 'app/core/services/context_srv';
+import { sceneVariablesSetToSchemaV2Variables } from 'app/features/dashboard-scene/serialization/sceneVariablesSetToSchemaV2Variables';
+import {
+  createSceneVariableFromVariableModel,
+  type TypedVariableModelV2,
+} from 'app/features/dashboard-scene/serialization/transformSaveModelSchemaV2ToScene';
+import { VariableEditorForm } from 'app/features/dashboard-scene/settings/variables/VariableEditorForm';
+import { type EditableVariableType, getVariableScene } from 'app/features/dashboard-scene/settings/variables/utils';
+import { fetchPredefinedVariables } from 'app/features/dashboard-scene/utils/predefinedVariables';
+import { getVariableName } from 'app/features/dashboard-scene/variables/utils';
+import { dispatch } from 'app/store/store';
+import { AccessControlAction } from 'app/types/accessControl';
+
+import { recreateVariable } from './api';
+import { invalidatePredefinedVariableCaches } from './cache';
+import { useVariableNameCollisionCheck } from './useVariableNameCollisionCheck';
+import {
+  buildVariableResource,
+  canManageGlobalVariables,
+  canManageVariableScope,
+  isRecreateVariableSave,
+  getNextAvailableVariableName,
+  getVariableFolderPickerExcludeUIDs,
+  getVariableFolderUid,
+  getVariableKind,
+  getVariableSpecName,
+  toWireVariableSpec,
+} from './utils';
+
+export interface VariableEditorViewProps {
+  /** The variable resource being edited; undefined when creating a new variable. */
+  source?: Variable;
+  /** Logical names of existing variables — used to pick a non-colliding default for new ones. */
+  existingNames?: string[];
+  onBack: () => void;
+}
+
+/**
+ * Standalone editor for global/folder-scoped variables. Bridges the k8s Variable
+ * resource to the scene-based VariableEditorForm used in dashboard settings: the
+ * wire spec is converted to a SceneVariable hosted in a minimal detached scene
+ * (variable set + time range so query editors can resolve context), and serialized
+ * back to a VariableKind on save.
+ */
+export function VariableEditorView({ source, existingNames = [], onBack }: VariableEditorViewProps) {
+  const styles = useStyles2(getStyles);
+  const [defaultName] = useState(() => getNextAvailableVariableName('query', existingNames));
+  const [sourceVariable] = useState(() => (source ? createSourceSceneVariable(source) : undefined));
+  const [initialVariable, setInitialVariable] = useState<SceneVariable | undefined>(sourceVariable?.variable);
+
+  useEffect(() => {
+    // An existing variable that can't be built must not fall back to a new one, or saving would overwrite it.
+    if (initialVariable || source) {
+      return;
+    }
+
+    let cancelled = false;
+    getVariableScene('query', { name: defaultName }).then((variable) => {
+      if (!cancelled) {
+        setInitialVariable(variable);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [defaultName, initialVariable, source]);
+
+  if (sourceVariable?.error) {
+    return (
+      <div className={styles.container}>
+        <Alert
+          severity="error"
+          title={t('variables-management.editor.load-error-title', 'This variable cannot be edited')}
+        >
+          {sourceVariable.error}
+        </Alert>
+        <Stack>
+          <Button variant="secondary" fill="outline" onClick={onBack}>
+            <Trans i18nKey="variables-management.editor.back">Back</Trans>
+          </Button>
+        </Stack>
+      </div>
+    );
+  }
+
+  if (!initialVariable) {
+    return (
+      <div className={styles.container}>
+        <Spinner />
+      </div>
+    );
+  }
+
+  return <VariableEditorLoaded source={source} onBack={onBack} initialVariable={initialVariable} />;
+}
+
+function createSourceSceneVariable(source: Variable): { variable?: SceneVariable; error?: string } {
+  try {
+    // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
+    return { variable: createSceneVariableFromVariableModel(getVariableKind(source) as TypedVariableModelV2) };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+interface VariableEditorLoadedProps {
+  source?: Variable;
+  onBack: () => void;
+  initialVariable: SceneVariable;
+}
+
+function VariableEditorLoaded({ source, onBack, initialVariable }: VariableEditorLoadedProps) {
+  const styles = useStyles2(getStyles);
+  const isNew = !source;
+  const allowGlobalScope = canManageGlobalVariables();
+  const [searchParams] = useSearchParams();
+  // '' is the FolderPicker root/global uid. Without root rights, start
+  // with undefined (empty selection) — NestedFolderPicker labels '' as "Dashboards"
+  // even when showRootFolder is false. New variables may preselect a folder via
+  // ?folderUid= from the folder Variables tab.
+  const [folderUid, setFolderUid] = useState<string | undefined>(() => {
+    if (source) {
+      return getVariableFolderUid(source) ?? '';
+    }
+    const folderFromUrl = searchParams.get('folderUid');
+    if (folderFromUrl) {
+      return folderFromUrl;
+    }
+    return allowGlobalScope ? '' : undefined;
+  });
+  const [sceneVariable, setSceneVariable] = useState(initialVariable);
+  const [createVariable, { isLoading: isCreating }] = useCreateVariableMutation();
+  const [updateVariable, { isLoading: isUpdating }] = useUpdateVariableMutation();
+  const [deleteVariable, { isLoading: isDeleting }] = useDeleteVariableMutation();
+  const [isRecreating, setIsRecreating] = useState(false);
+  const [hasNameError, setHasNameError] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  // Keep delete out of isSaving so the Save button doesn't flash "Saving..." mid-delete.
+  const isSaving = isCreating || isUpdating || isRecreating;
+  const isBusy = isSaving || isDeleting;
+
+  const variableState = sceneVariable.useState();
+  const logicalName = variableState.name;
+  const { isChecking: isCheckingName, collisionError } = useVariableNameCollisionCheck(
+    logicalName,
+    folderUid,
+    source?.metadata.name,
+    hasNameError
+  );
+
+  const canReferenceDatasource = canReferenceDatasourceVariable(sceneVariable);
+  const {
+    variables: datasourceVariables,
+    fetchFailed: datasourceVariablesFetchFailed,
+    hasLoaded: isSceneReady,
+  } = useReferenceableDatasourceVariables(folderUid, logicalName, canReferenceDatasource);
+  const referencedDatasourceName =
+    canReferenceDatasource && 'datasource' in variableState
+      ? getDatasourceVariableName(variableState.datasource)
+      : undefined;
+  // Only a warning: a dashboard's own `ds` wins over a predefined one, so relying on each
+  // dashboard to define it is valid. Skipped when the fetch failed, since the list is unknown.
+  const missingDatasourceVariable =
+    referencedDatasourceName &&
+    datasourceVariables &&
+    !datasourceVariablesFetchFailed &&
+    !datasourceVariables.some((v) => v.spec.name === referencedDatasourceName)
+      ? referencedDatasourceName
+      : undefined;
+
+  const sourceFolderUid = source ? getVariableFolderUid(source) : undefined;
+  // Folder CanEdit gates mutations the same way admission does. Skip the root/global
+  // uid ('' / undefined) — those use allowGlobalScope instead.
+  const { data: selectedFolder } = useGetCombinedFolderQuery(folderUid ? folderUid : undefined);
+  // Reuse the selected-folder query when the source is still in that folder.
+  const needsSeparateSourceFolder = Boolean(sourceFolderUid && sourceFolderUid !== folderUid);
+  const { data: sourceFolder } = useGetCombinedFolderQuery(needsSeparateSourceFolder ? sourceFolderUid : undefined);
+  // Trust canEdit only when the response matches the requested UID — isLoading alone
+  // can stay false while data still reflects the previous folder after a switch.
+  const selectedFolderMatches = Boolean(folderUid && selectedFolder?.uid === folderUid);
+  const sourceFolderMatches = Boolean(sourceFolderUid && sourceFolder?.uid === sourceFolderUid);
+  const selectedFolderCanEdit = selectedFolderMatches ? selectedFolder?.canEdit : undefined;
+  const sourceFolderCanEdit = needsSeparateSourceFolder
+    ? sourceFolderMatches
+      ? sourceFolder?.canEdit
+      : undefined
+    : selectedFolderCanEdit;
+  const selectedScopeReady = !folderUid || selectedFolderMatches;
+  const sourceScopeReady =
+    !sourceFolderUid || (needsSeparateSourceFolder ? sourceFolderMatches : selectedFolderMatches);
+
+  // Root/global is Admin-only (seeded writer). Folder-scoped saves require folder CanEdit.
+  // Edit also requires source-scope rights so rename/move (create-then-delete) cannot
+  // leave a duplicate when the original cannot be deleted.
+  const hasValidFolderScope = allowGlobalScope || Boolean(folderUid);
+  const canManageSelectedScope = canManageVariableScope(folderUid, selectedFolderCanEdit, allowGlobalScope);
+  const canManageSourceScope =
+    sourceScopeReady && canManageVariableScope(sourceFolderUid ?? '', sourceFolderCanEdit, allowGlobalScope);
+  const canDeleteVariables = contextSrv.hasPermission(AccessControlAction.VariablesDelete);
+  // Renaming or re-scoping goes through recreateVariable (create-then-delete),
+  // so it needs delete rights or it leaves the original behind.
+  const isRecreate = isRecreateVariableSave(source, logicalName, folderUid);
+  const canSave =
+    datasourceVariables !== undefined &&
+    !isBusy &&
+    !hasNameError &&
+    !collisionError &&
+    !isCheckingName &&
+    hasValidFolderScope &&
+    selectedScopeReady &&
+    canManageSelectedScope &&
+    (isNew || canManageSourceScope) &&
+    (!isRecreate || canDeleteVariables);
+  // variables:write (or create) can open /edit/:name, but delete is a separate action —
+  // same variables:delete gate as the list page, plus source-scope rights.
+  const canDelete = !isBusy && Boolean(source) && canManageSourceScope && canDeleteVariables;
+  // Viewers can open unmanageable scopes to inspect them, but must not relocate (copy-as-move).
+  const canChangeFolder = isNew || canManageSourceScope;
+
+  const scene = useMemo(
+    () =>
+      new EmbeddedScene({
+        $timeRange: new SceneTimeRange({}),
+        $variables: new SceneVariableSet({ variables: [sceneVariable] }),
+        body: new SceneFlexLayout({ children: [] }),
+      }),
+    [sceneVariable]
+  );
+
+  useEffect(() => {
+    const variableSet = scene.state.$variables;
+    if (!(variableSet instanceof SceneVariableSet)) {
+      return;
+    }
+    // While a new folder's list loads, offer nothing rather than the previous folder's variables.
+    variableSet.setState({
+      variables: [
+        // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
+        ...(datasourceVariables ?? []).map((v) => createSceneVariableFromVariableModel(v as TypedVariableModelV2)),
+        sceneVariable,
+      ],
+    });
+    // The stored `${ds}` value is unchanged, so nothing re-runs the query against the swapped-in instance.
+    if (datasourceVariables && scene.isActive && sceneVariable instanceof QueryVariable) {
+      sceneVariable.refreshOptions();
+    }
+  }, [scene, sceneVariable, datasourceVariables]);
+
+  // Activate only once the datasource variables are in the set, so a `${ds}` reference
+  // resolves on the edited variable's first update instead of failing and never retrying.
+  useEffect(() => {
+    if (!isSceneReady) {
+      return;
+    }
+    const deactivate = scene.activate();
+    // Datasource pickers and query editors resolve `${ds}` through the global scene context.
+    const prevSceneContext = window.__grafanaSceneContext;
+    window.__grafanaSceneContext = scene;
+    return () => {
+      window.__grafanaSceneContext = prevSceneContext;
+      deactivate();
+    };
+  }, [scene, isSceneReady]);
+
+  const onTypeChange = async (type: EditableVariableType) => {
+    const { name, label } = sceneVariable.state;
+    setSceneVariable(await getVariableScene(type, { name, label }));
+    // The new scene carries over the last committed (valid) name.
+    setHasNameError(false);
+  };
+
+  const onSave = async () => {
+    const variableSet = scene.state.$variables;
+    if (!(variableSet instanceof SceneVariableSet)) {
+      return;
+    }
+
+    // The referenceable datasource variables in the set carry an origin, so serialization skips them.
+    const [kind] = sceneVariablesSetToSchemaV2Variables(variableSet, true);
+    if (!kind || !kind.spec.name) {
+      return;
+    }
+
+    // Failed mutations already surface an error notification via the enhanced
+    // RTK endpoints, so rejections are swallowed and the editor stays open.
+    try {
+      if (isNew) {
+        await createVariable({ variable: buildVariableResource(kind, folderUid) }).unwrap();
+        invalidatePredefinedVariableCaches();
+        onBack();
+        return;
+      }
+
+      const sourceName = source.metadata.name;
+      if (!sourceName) {
+        return;
+      }
+
+      const sourceFolderUid = getVariableFolderUid(source) ?? '';
+      if (kind.spec.name === getVariableSpecName(source) && folderUid === sourceFolderUid) {
+        await updateVariable({ name: sourceName, patch: { spec: toWireVariableSpec(kind) } }).unwrap();
+        invalidatePredefinedVariableCaches();
+        onBack();
+        return;
+      }
+
+      // Renaming or moving is a create-then-delete under the hood; surface it as
+      // a single operation instead of separate "created" + "deleted" toasts.
+      setIsRecreating(true);
+      let recreateResult;
+      try {
+        recreateResult = await recreateVariable(sourceName, kind, folderUid || undefined);
+      } finally {
+        setIsRecreating(false);
+      }
+      // When the original could not be removed, recreateVariable already surfaced
+      // a warning about the leftover copy — a success toast would contradict it.
+      if (recreateResult.deletedOriginal) {
+        dispatch(
+          notifyApp(
+            createSuccessNotification(
+              folderUid !== sourceFolderUid
+                ? t('variables-management.editor.moved', 'Variable moved')
+                : t('variables-management.editor.updated', 'Variable updated')
+            )
+          )
+        );
+      }
+      onBack();
+    } catch {
+      // Error already notified.
+    }
+  };
+
+  const onDelete = async () => {
+    try {
+      if (source?.metadata.name) {
+        await deleteVariable({ name: source.metadata.name }).unwrap();
+        invalidatePredefinedVariableCaches();
+      }
+      onBack();
+    } catch {
+      // Error already notified.
+    }
+  };
+
+  return (
+    <div className={styles.container}>
+      <Field
+        noMargin
+        className={styles.folderField}
+        label={t('variables-management.editor.folder-label', 'Folder')}
+        description={
+          allowGlobalScope || folderUid === ''
+            ? t(
+                'variables-management.editor.folder-description',
+                'Scope the variable to a folder, or choose the root Dashboards folder to make it global (available to all dashboards)'
+              )
+            : t(
+                'variables-management.editor.folder-description-folder-only',
+                'Scope the variable to a folder you can edit'
+              )
+        }
+      >
+        <FolderPicker
+          // When the picker is usable (create, or edit of a manageable scope), only list
+          // folders the user can edit — same as create. View-only / root listing is only
+          // needed to display an unmanageable current scope with the picker disabled.
+          showRootFolder={allowGlobalScope || !canChangeFolder}
+          permission={canChangeFolder ? 'edit' : 'view'}
+          value={folderUid}
+          disabled={!canChangeFolder}
+          onChange={(uid) => setFolderUid(allowGlobalScope ? (uid ?? '') : uid)}
+          excludeUIDs={getVariableFolderPickerExcludeUIDs()}
+        />
+      </Field>
+
+      {missingDatasourceVariable && (
+        <Alert
+          className={styles.folderField}
+          severity="warning"
+          title={t(
+            'variables-management.editor.missing-datasource-variable',
+            "${{name}} isn't global or in this folder, so it only resolves on dashboards that define their own {{name}}",
+            { name: missingDatasourceVariable }
+          )}
+        />
+      )}
+
+      {isSceneReady ? (
+        <VariableEditorForm
+          // Remount on type change (new scene key) so the form's name-error state and
+          // uncontrolled inputs reset with the committed name — same as dashboard settings.
+          key={sceneVariable.state.key}
+          variable={sceneVariable}
+          onTypeChange={onTypeChange}
+          onGoBack={onBack}
+          onDelete={onDelete}
+          onNameErrorChange={setHasNameError}
+          externalNameError={collisionError}
+          standalone
+        />
+      ) : (
+        <Spinner />
+      )}
+
+      <Stack gap={2}>
+        <Button variant="primary" onClick={onSave} disabled={!canSave}>
+          {isSaving
+            ? t('variables-management.editor.saving', 'Saving...')
+            : t('variables-management.editor.save', 'Save')}
+        </Button>
+        <Button variant="secondary" fill="outline" onClick={onBack} disabled={isBusy}>
+          <Trans i18nKey="variables-management.editor.cancel">Cancel</Trans>
+        </Button>
+        {!isNew && (
+          <Button variant="destructive" fill="outline" onClick={() => setShowDeleteModal(true)} disabled={!canDelete}>
+            <Trans i18nKey="variables-management.editor.delete">Delete</Trans>
+          </Button>
+        )}
+      </Stack>
+
+      {showDeleteModal && (
+        <ConfirmModal
+          isOpen
+          title={t('variables-management.editor.delete-modal-title', 'Delete variable')}
+          body={t('variables-management.editor.delete-modal-body', 'Are you sure you want to delete "{{name}}"?', {
+            name: sceneVariable.state.name,
+          })}
+          confirmText={t('variables-management.editor.delete-modal-confirm', 'Delete')}
+          onConfirm={() => {
+            setShowDeleteModal(false);
+            onDelete();
+          }}
+          onDismiss={() => setShowDeleteModal(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Datasource variables the edited variable may reference as `${ds}`: global ones, plus those
+ * in its own folder when folder-scoped. Never other folders' — those are absent from dashboards
+ * outside that folder. `variables` is undefined while the current scope's list loads;
+ * `hasLoaded` stays true after the first load so the form isn't remounted on scope changes.
+ */
+function useReferenceableDatasourceVariables(folderUid: string | undefined, excludeName: string, enabled: boolean) {
+  const { value, loading } = useAsync(async () => {
+    if (!enabled) {
+      return [];
+    }
+    const variables = await fetchPredefinedVariables(folderUid || undefined);
+    return variables === null ? null : variables.filter((v) => v.kind === 'DatasourceVariable');
+  }, [folderUid, enabled]);
+
+  // The name commits on every keystroke. Only a name that matches a loaded variable changes the
+  // list, so typing doesn't rebuild the scene's datasource variables or re-run the preview query.
+  const excludedName = value?.some((v) => v.spec.name === excludeName) ? excludeName : undefined;
+  const variables = useMemo(
+    () => (loading ? undefined : (value ?? []).filter((v) => v.spec.name !== excludedName)),
+    [loading, value, excludedName]
+  );
+  const [hasLoaded, setHasLoaded] = useState(!enabled);
+  if (!hasLoaded && variables !== undefined) {
+    setHasLoaded(true);
+  }
+
+  return { variables, fetchFailed: !loading && value === null, hasLoaded };
+}
+
+function canReferenceDatasourceVariable(variable: SceneVariable): boolean {
+  return (
+    variable instanceof QueryVariable || variable instanceof AdHocFiltersVariable || variable instanceof GroupByVariable
+  );
+}
+
+function getDatasourceVariableName(datasource: unknown): string | undefined {
+  if (typeof datasource !== 'object' || datasource === null || !('uid' in datasource)) {
+    return undefined;
+  }
+  return typeof datasource.uid === 'string' ? getVariableName(datasource.uid) : undefined;
+}
+
+const getStyles = (theme: GrafanaTheme2) => ({
+  container: css({
+    display: 'flex',
+    flexDirection: 'column',
+    gap: theme.spacing(2),
+    maxWidth: theme.breakpoints.values.xl,
+  }),
+  folderField: css({
+    maxWidth: theme.spacing(60),
+  }),
+});

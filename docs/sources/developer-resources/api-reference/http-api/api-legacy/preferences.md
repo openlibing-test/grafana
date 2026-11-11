@@ -1,0 +1,218 @@
+---
+aliases:
+  - ../../../../http_api/preferences/ # /docs/grafana/next/http_api/preferences/
+  - ../../../../developers/http_api/preferences/ # /docs/grafana/next/developers/http_api/preferences/
+  - ../../../../developer-resources/api-reference/http-api/preferences/ #legacy folder
+canonical: https://grafana.com/docs/grafana/latest/developer-resources/api-reference/http-api/api-legacy/preferences/
+description: Grafana HTTP API
+keywords:
+  - grafana
+  - http
+  - documentation
+  - api
+  - preferences
+labels:
+  products:
+    - enterprise
+    - oss
+    - cloud
+title: 'Preferences API'
+---
+
+# User and Org Preferences API
+
+{{< docs/shared lookup="developers/deprecated-apis.md" source="grafana" version="<GRAFANA_VERSION>" >}}
+
+{{< admonition type="note" >}}
+This HTTP API is deprecated. Use the [Preferences HTTP API](https://grafana.com/docs/grafana/<GRAFANA_VERSION>/developer-resources/api-reference/http-api/preferences/) instead. To learn how the legacy endpoints map to the new ones, refer to [Migrate from the legacy Preferences API](https://grafana.com/docs/grafana/<GRAFANA_VERSION>/developer-resources/api-reference/http-api/preferences/#migrate-from-the-legacy-preferences-api).
+{{< /admonition >}}
+
+Keys:
+
+- **theme** - One of: `light`, `dark`, or an empty string for the default theme
+- **homeDashboardId** - Deprecated. Use `homeDashboardUID` instead.
+- **homeDashboardUID** - The `:uid` of a dashboard, or the reserved value `global-home`, which shows the instance default home (`home_page`, `default_home_dashboard_path`, or the Grafana home page) instead of the dashboard set at the next level. An empty string clears the preference so the next level applies. `GET` returns the stored value as-is, including `global-home`; the resolved home that Grafana computes from all levels never contains it.
+- **timezone** - Any valid IANA timezone string (e.g., `America/New_York`, `Europe/London`), `utc`, `browser`, or an empty string for the default.
+
+Omitting a key will cause the current value to be replaced with the
+system default value.
+
+## Get Current User Prefs
+
+`GET /api/user/preferences`
+
+**Example Request**:
+
+```http
+GET /api/user/preferences HTTP/1.1
+Accept: application/json
+Content-Type: application/json
+Authorization: Bearer <SERVICE_ACCOUNT_TOKEN>
+```
+
+**Example Response**:
+
+```http
+HTTP/1.1 200
+Content-Type: application/json
+
+{
+    "theme": "",
+    "homeDashboardId": 217,
+    "homeDashboardUID": "jcIIG-07z",
+    "timezone": "utc",
+    "weekStart": "",
+    "navbar": {
+        "bookmarkUrls": null
+    },
+    "queryHistory": {
+        "homeTab": ""
+    }
+}
+```
+
+## Update Current User Prefs
+
+`PUT /api/user/preferences`
+
+**Example Request**:
+
+```http
+PUT /api/user/preferences HTTP/1.1
+Accept: application/json
+Content-Type: application/json
+Authorization: Bearer <SERVICE_ACCOUNT_TOKEN>
+
+{
+  "theme": "",
+  "homeDashboardUID":"jcIIG-07z",
+  "timezone":"utc"
+}
+```
+
+**Example Response**:
+
+```http
+HTTP/1.1 200
+Content-Type: text/plain; charset=utf-8
+
+{"message":"Preferences updated"}
+```
+
+## Patch Current User Prefs
+
+Update one or more preferences without modifying the others.
+
+`PATCH /api/user/preferences`
+
+**Example Request**:
+
+```http
+PATCH /api/user/preferences HTTP/1.1
+Accept: application/json
+Content-Type: application/json
+Authorization: Bearer <SERVICE_ACCOUNT_TOKEN>
+
+{
+  "theme": "dark"
+}
+```
+
+**Example Response**:
+
+```http
+HTTP/1.1 200
+Content-Type: text/plain; charset=utf-8
+
+{"message":"Preferences updated"}
+```
+
+## Get Current Org Prefs
+
+`GET /api/org/preferences`
+
+**Example Request**:
+
+```http
+GET /api/org/preferences HTTP/1.1
+Accept: application/json
+Content-Type: application/json
+Authorization: Bearer <SERVICE_ACCOUNT_TOKEN>
+```
+
+**Example Response**:
+
+```http
+HTTP/1.1 200
+Content-Type: application/json
+
+{
+    "theme": "",
+    "homeDashboardId": 0,
+    "homeDashboardUID": "",
+    "timezone": "",
+    "weekStart": "",
+    "navbar": {
+        "bookmarkUrls": null
+    },
+    "queryHistory": {
+        "homeTab": ""
+    }
+}
+```
+
+## Update Current Org Prefs
+
+`PUT /api/org/preferences`
+
+**Example Request**:
+
+```http
+PUT /api/org/preferences HTTP/1.1
+Accept: application/json
+Content-Type: application/json
+Authorization: Bearer <SERVICE_ACCOUNT_TOKEN>
+
+{
+  "theme": "",
+  "homeDashboardUID":"jcIIG-07z",
+  "timezone":"utc"
+}
+```
+
+**Example Response**:
+
+```http
+HTTP/1.1 200
+Content-Type: text/plain; charset=utf-8
+
+{"message":"Preferences updated"}
+```
+
+## Patch Current Org Prefs
+
+Update one or more preferences without modifying the others.
+
+`PATCH /api/org/preferences`
+
+**Example Request**:
+
+```http
+PATCH /api/org/preferences HTTP/1.1
+Accept: application/json
+Content-Type: application/json
+Authorization: Bearer <SERVICE_ACCOUNT_TOKEN>
+
+{
+  "theme": "dark"
+}
+```
+
+**Example Response**:
+
+```http
+HTTP/1.1 200
+Content-Type: text/plain; charset=utf-8
+
+{"message":"Preferences updated"}
+```

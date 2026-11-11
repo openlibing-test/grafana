@@ -1,0 +1,134 @@
+import { useCallback, useMemo } from 'react';
+
+import { type RoutingTree, notificationsAPI } from '../../api/notifications';
+import { type Label } from '../../matchers/types';
+import { type RouteMatchResult, type TreeMatch, matchInstancesToRoute } from '../route.utils';
+import { USER_DEFINED_TREE_NAME, convertRoutingTreeToRoute } from '../routingTree.utils';
+import { type Route, type RouteWithID } from '../types';
+
+export type RouteMatch = {
+  route: Route;
+  routeTree: {
+    // Add some metadata about the tree that is useful for displaying diagnostics
+    metadata: Pick<RoutingTree['metadata'], 'name'>;
+    // We'll include the entire expanded policy tree for diagnostics
+    expandedSpec: RouteWithID;
+  };
+  matchDetails: RouteMatchResult<RouteWithID>;
+};
+
+export type InstanceMatchResult = {
+  // The labels we used to match to our policies
+  labels: Label[];
+  // The routes that matched the labels where the key is a route and the value is an array of instances that match that route
+  matchedRoutes: RouteMatch[];
+};
+
+interface UseMatchInstancesToRouteTreesReturnType
+  extends ReturnType<typeof notificationsAPI.endpoints.listRoutingTree.useQuery> {
+  matchInstancesToRouteTrees: (instances: Label[][]) => InstanceMatchResult[];
+}
+
+/**
+ * React hook that finds notification policy routes in all routing trees that match the provided set of alert instances.
+ *
+ * This hook queries the routing tree API and processes each tree to:
+ * 1. Convert RoutingTree structures to Route structures
+ * 2. Compute the inherited properties for each node in the tree
+ * 3. Find routes within each tree that match the given set of labels
+ *
+ * @returns An object containing a `matchInstancesToRoutingTrees` function that takes alert instances
+ *          and returns an array of InstanceMatchResult objects, each containing the matched routes and matching details
+ */
+export function useMatchInstancesToRouteTrees(): UseMatchInstancesToRouteTreesReturnType {
+  const { data, ...rest } = notificationsAPI.endpoints.listRoutingTree.useQuery(
+    {},
+    {
+      refetchOnFocus: true,
+      refetchOnReconnect: true,
+    }
+  );
+
+  const memoizedFunction = useCallback(
+    (instances: Label[][]) => matchInstancesToRouteTrees(data?.items ?? [], instances),
+    [data?.items]
+  );
+
+  return {
+    matchInstancesToRouteTrees: memoizedFunction,
+    ...rest,
+  };
+}
+
+/**
+ * React hook that finds notification policy routes in a single routing tree that match the provided set of alert instances.
+ *
+ * Unlike `useMatchInstancesToRouteTrees` which matches against all trees,
+ * this hook matches against a specific tree (e.g. one selected via the RoutingTreeSelector).
+ *
+ * @param routingTree - The routing tree to match against, or null if none selected
+ * @param instances - Array of label sets to match against the tree
+ *
+ * @example
+ * ```tsx
+ * const [selectedTree, setSelectedTree] = useState<RoutingTree | null>(null);
+ * const labels: Label[] = [['severity', 'critical'], ['team', 'platform']];
+ *
+ * const result = useMatchInstancesToSpecificRouteTree(selectedTree, [labels]);
+ * // result.matchedPolicies → Map<Route, MatchResult[]>
+ * // result.expandedTree → full tree with inherited properties
+ * ```
+ */
+export function useMatchInstancesToSpecificRouteTree(
+  routingTree: RoutingTree | null,
+  instances: Label[][]
+): TreeMatch | null {
+  return useMemo(() => {
+    if (!routingTree) {
+      return null;
+    }
+
+    const rootRoute = convertRoutingTreeToRoute(routingTree);
+    return matchInstancesToRoute(rootRoute, instances);
+  }, [routingTree, instances]);
+}
+
+/**
+ * This function will match a set of labels to multiple routing trees. Assumes a list of routing trees has already been fetched.
+ *
+ * Use "useMatchInstancesToRouteTrees" if you want the hook to automatically fetch the latest definition of routing trees.
+ */
+export function matchInstancesToRouteTrees(trees: RoutingTree[], instances: Label[][]): InstanceMatchResult[] {
+  // Process each tree and get matches for all instances
+  const treeMatches = trees.map<TreeMatch>((tree) => {
+    const rootRoute = convertRoutingTreeToRoute(tree);
+    return matchInstancesToRoute(rootRoute, instances);
+  });
+
+  // Index each tree's matches by instance once, so grouping doesn't rescan every match for every instance.
+  const matchesByInstance = treeMatches.map(({ expandedTree, matchedPolicies }, index) => {
+    const routeTree = {
+      metadata: { name: trees[index].metadata.name ?? USER_DEFINED_TREE_NAME },
+      expandedSpec: expandedTree,
+    };
+    const byLabels = new Map<Label[], RouteMatch[]>();
+    for (const [route, results] of matchedPolicies) {
+      for (const matchDetails of results) {
+        const matches = byLabels.get(matchDetails.labels) ?? [];
+        matches.push({ route, routeTree, matchDetails });
+        byLabels.set(matchDetails.labels, matches);
+      }
+    }
+    return byLabels;
+  });
+
+  // Group results by instance
+  return instances.map<InstanceMatchResult>((labels) => {
+    const allMatchedRoutes = matchesByInstance.flatMap((byLabels) => byLabels.get(labels) ?? []);
+
+    return {
+      labels,
+      matchedRoutes: allMatchedRoutes,
+    };
+  });
+}

@@ -1,0 +1,608 @@
+import { css } from '@emotion/css';
+import { Meta, Canvas } from '@storybook/addon-docs/blocks';
+import { PanelChrome } from './PanelChrome';
+
+import { action } from 'storybook/actions';
+import { LoadingState } from '@grafana/data';
+import { Button } from '../Button/Button';
+import { Menu } from '../Menu/Menu';
+import { Stack } from '../Layout/Stack/Stack';
+import { IconButton } from '../IconButton/IconButton';
+import * as PanelChromeStories from './PanelChrome.story';
+import { ExampleFrame } from '../../utils/storybook/ExampleFrame';
+
+<Meta title="MDX|PanelChrome" component={PanelChrome} />
+
+# PanelChrome
+
+Component used for rendering content wrapped in the same style as Grafana panels.
+
+## Panel notices (alpha)
+
+Grafana core panels can publish errors, warnings, and informational notices with `usePanelNotices`.
+The hook owns a source for the component's lifetime and removes its entries on unmount.
+Memoize the items and resolver to avoid republishing unchanged notices.
+The hook returns the panel notices controller, or `undefined` when the host does not support notices;
+retain an inline fallback in that case. This unstable API is for Grafana core use only for now.
+In dashboards, this capability requires `grafana.newPanelQueryErrorsUI`.
+
+```tsx
+import { useMemo } from 'react';
+import { type PanelNotice } from '@grafana/data';
+import { usePanelNotices } from '@grafana/ui/unstable';
+
+function ConfigurationNotice({ valid, fix }: { valid: boolean; fix: () => void }) {
+  const notices = useMemo<PanelNotice[]>(
+    () =>
+      valid
+        ? []
+        : [
+            {
+              id: 'numeric-field',
+              severity: 'warning',
+              text: 'Choose a numeric field.',
+              actions: [{ id: 'fix', label: 'Choose field', onClick: fix }],
+            },
+          ],
+    [valid, fix]
+  );
+  const panelNotices = usePanelNotices(notices);
+  return !panelNotices && !valid ? <div>Choose a numeric field.</div> : null;
+}
+```
+
+For imperative producers, `usePanelContext().notices?.createSource()` returns `set`,
+`setActionResolver`, and `dispose`. `set` replaces only that source's entries; `set([])` clears them.
+Dispose the source when its owner stops using the panel. IDs must be unique within a source.
+Sources and callbacks are runtime state and must never be saved into dashboard JSON.
+Panel-owned `PanelNotice` entries become `PanelStatusItem` entries with `origin: 'panel'`.
+The shared status snapshot also includes query errors, query notices, and plugin loading errors,
+with their original provenance preserved.
+
+Pass an optional second argument to `usePanelNotices` to decorate incoming status items, or
+use `source.setActionResolver`. Resolvers receive the normalized status item, including origin,
+query `refId`, datasource UID, and original error/notice when available. They return actions and
+an optional Assistant policy. Datasources can implement `DataSourceApi.getPanelStatusActions`
+to decorate their own query errors and notices; its second argument contains current panel data and query.
+Unattributed errors are still available to host/panel resolvers.
+
+Actions are combined in order: status item, datasource, then registered resolvers. Action IDs are
+namespaced by contributor. For query errors and notices, `assistant: 'hidden'` suppresses the
+panel-level Assistant action. Panel-owned notices do not trigger Assistant investigation.
+Custom actions appear only in the inspector, as secondary buttons; the status popover lists
+errors and notices and links to Inspect. Callbacks may return promises.
+Pending state is shared between inspector views, duplicate execution is blocked, and failures appear inline.
+
+Grafana core hosts supply normalized query status through panel context. `PanelStatusStore` and
+`getPanelDataStatusItems` are internal host implementation details, not plugin APIs.
+
+<Canvas of={PanelChromeStories.PanelNotices} />
+
+### Basic Usage: Title, Description and Content
+
+<Canvas of={PanelChromeStories.Basic} />
+
+### Menu: Standard & Hover
+
+<ExampleFrame>
+
+  <Stack gap={2} alignItems="flex-start" wrap="wrap">
+  <PanelChrome
+    title="My awesome panel title"
+    menu={() => (
+       <Menu>
+          <Menu.Item label="View" icon="eye" />
+          <Menu.Item label="Edit" icon="edit" />
+          <Menu.Item label="Share" icon="share-alt" />
+          <Menu.Divider />
+          <Menu.Item label="Remove" icon="trash-alt" />
+        </Menu>
+       )}
+    description="Here I will put a description that explains a bit more this panel"
+    width={400}
+    height={200}
+
+>
+
+    {(innerwidth, innerheight) => {
+      return (
+        <div
+          style={{
+            width: innerwidth,
+            height: innerheight,
+            background: 'rgba(230,0,0,0.05)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          Content with fixed header
+        </div>
+      );
+    }}
+
+  </PanelChrome>
+
+  <PanelChrome
+    title="My awesome panel title"
+    menu={() => (
+       <Menu>
+          <Menu.Item label="View" icon="eye" />
+          <Menu.Item label="Edit" icon="edit" />
+          <Menu.Item label="Share" icon="share-alt" />
+          <Menu.Divider />
+          <Menu.Item label="Remove" icon="trash-alt" />
+        </Menu>
+       )}
+    hoverHeader={true}
+    description="Here I will put a description that explains a bit more this panel"
+    width={400}
+    height={200}
+
+>
+
+    {(innerwidth, innerheight) => {
+      return (
+        <div
+          style={{
+            width: innerwidth,
+            height: innerheight,
+            background: 'rgba(230,0,0,0.05)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          Content with hoverHeader=true
+        </div>
+      );
+    }}
+
+  </PanelChrome>
+</Stack>
+</ExampleFrame>
+
+### States: Loading , Streaming, Error
+
+```tsx
+<PanelChrome
+  title="My awesome panel title"
+  loadingState={<Loading.Loading || Loading.Streaming>}
+  statusMessage='Error text'
+  statusMessageOnClick={action('ErrorIndicator: onClick fired')}
+  width={400}
+  height={200}
+>
+  {(innerwidth, innerheight) => {
+    return (
+      <div
+        style={{
+          width: innerwidth,
+          height: innerheight,
+          background: 'rgba(230,0,0,0.05)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        New panel with old API
+      </div>
+    );
+  }}
+</PanelChrome>
+```
+
+<ExampleFrame>
+
+  <Stack gap={2} alignItems="flex-start" wrap="wrap">
+  <PanelChrome
+    title="My awesome panel title"
+    loadingState={LoadingState.Loading}
+    width={400}
+    height={200}
+
+>
+
+    {(innerwidth, innerheight) => {
+      return (
+        <div
+          style={{
+            width: innerwidth,
+            height: innerheight,
+            background: 'rgba(230,0,0,0.05)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          Data is loading
+        </div>
+      );
+    }}
+
+  </PanelChrome>
+
+  <PanelChrome
+    title="My awesome panel title"
+    loadingState={LoadingState.Streaming}
+    width={400}
+    height={200}
+  >
+
+    {(innerwidth, innerheight) => {
+      return (
+        <div
+          style={{
+            width: innerwidth,
+            height: innerheight,
+            background: 'rgba(230,0,0,0.05)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          Data is Streaming
+        </div>
+      );
+    }}
+
+  </PanelChrome>
+
+  <PanelChrome
+    title="My awesome panel title"
+    statusMessage='Error text'
+    statusMessageOnClick={action('ErrorIndicator: onClick fired')}
+    width={400}
+    height={200}
+  >
+
+    {(innerwidth, innerheight) => {
+      return (
+        <div
+          style={{
+            width: innerwidth,
+            height: innerheight,
+            background: 'rgba(230,0,0,0.05)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          There is an error
+        </div>
+      );
+    }}
+
+  </PanelChrome>
+</Stack>
+</ExampleFrame>
+
+### Extra options? Title items and actions
+
+```tsx
+<PanelChrome
+  title="My awesome panel title"
+  titleItems={
+    <>
+      <IconButton
+        className={css`
+          margin-right: 10px;
+        `}
+        name="github"
+        variant="secondary"
+        tooltip="extra content to render"
+      />
+      <IconButton name="sliders-v-alt" variant="secondary" tooltip="extra content2 to render" />
+    </>
+  }
+  actions={
+    <Button size="sm" variant="secondary" key="A">
+      Breakdown
+    </Button>
+  }
+  width={500}
+  height={200}
+>
+  {(innerwidth, innerheight) => {
+    return (
+      <div
+        style={{
+          width: innerwidth,
+          height: innerheight,
+          background: 'rgba(230,0,0,0.05)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        New panel with old API
+      </div>
+    );
+  }}
+</PanelChrome>
+```
+
+<ExampleFrame>
+  <PanelChrome
+    title="My awesome panel title"
+    titleItems={
+      <>
+        <IconButton
+          className={css`
+            margin-right: 10px;
+          `}
+          name="github"
+          variant="secondary"
+          tooltip="extra content to render"
+        />
+        <IconButton name="sliders-v-alt" variant="secondary" tooltip="extra content to render" />
+      </>
+    }
+    actions={
+      <Button size="sm" variant="secondary" key="A">
+        Breakdown
+      </Button>
+    }
+    width={500}
+    height={200}
+  >
+    {(innerwidth, innerheight) => {
+      return (
+        <div
+          style={{
+            width: innerwidth,
+            height: innerheight,
+            background: 'rgba(230,0,0,0.05)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          Content
+        </div>
+      );
+    }}
+  </PanelChrome>
+</ExampleFrame>
+
+### Migration from old PanelChrome (before v9.4.0)
+
+#### Before
+
+```tsx
+<PanelChrome
+  title="My awesome panel title"
+  leftItems={[<PanelChrome.LoadingIndicator loading={isRefreshing} onCancel={onCancelQuery} key="loading-indicator" />]}
+  width={400}
+  height={200}
+>
+  {(innerwidth, innerheight) => {
+    return (
+      <div
+        style={{
+          width: innerwidth,
+          height: innerheight,
+          background: 'white',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        New panel with old API
+      </div>
+    );
+  }}
+</PanelChrome>
+```
+
+<ExampleFrame>
+  <PanelChrome
+    title="My awesome panel title"
+    leftItems={[
+      <PanelChrome.LoadingIndicator
+        loading={true}
+        onCancel={action('CancelQuery: onClick fired')}
+        key="loading-indicator"
+      />,
+    ]}
+    width={400}
+    height={200}
+  >
+    {(innerwidth, innerheight) => {
+      return (
+        <div
+          style={{
+            width: innerwidth,
+            height: innerheight,
+            background: 'rgba(230,0,0,0.05)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          Content
+        </div>
+      );
+    }}
+  </PanelChrome>
+</ExampleFrame>
+#### After
+
+```tsx
+<PanelChrome
+  title="My awesome panel title"
+  loadingState={LoadingState.Loading}
+  onCancelQuery={onCancelQuery}
+  width={400}
+  height={200}
+>
+  {(innerwidth, innerheight) => {
+    return (
+      <div
+        style={{
+          width: innerwidth,
+          height: innerheight,
+          background: 'white',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        New panel with old API
+      </div>
+    );
+  }}
+</PanelChrome>
+```
+
+<ExampleFrame>
+  <PanelChrome
+    title="My awesome panel title"
+    loadingState={LoadingState.Loading}
+    onCancelQuery={action('CancelQuery: onClick fired')}
+    width={400}
+    height={200}
+  >
+    {(innerwidth, innerheight) => {
+      return (
+        <div
+          style={{
+            width: innerwidth,
+            height: innerheight,
+            background: 'rgba(230,0,0,0.05)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          Content
+        </div>
+      );
+    }}
+  </PanelChrome>
+</ExampleFrame>
+
+### Sub-header content
+
+The panel supports displaying additional content below the main header using the `subHeaderContent` prop. This can be used to show context-specific information.
+
+```tsx
+<PanelChrome
+  title="My awesome panel title"
+  subHeaderContent={
+    <div style={{ display: 'flex', gap: '8px', padding: '4px 8px' }}>
+      <span style={{ fontSize: '12px', color: '#999' }}>Additional info</span>
+    </div>
+  }
+  width={400}
+  height={200}
+>
+  {(innerwidth, innerheight) => {
+    return (
+      <div
+        style={{
+          width: innerwidth,
+          height: innerheight,
+          background: 'rgba(230,0,0,0.05)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        Content
+      </div>
+    );
+  }}
+</PanelChrome>
+```
+
+<ExampleFrame>
+  <PanelChrome
+    title="My awesome panel title"
+    subHeaderContent={
+      <div style={{ display: 'flex', gap: '8px', padding: '4px 8px' }}>
+        <span style={{ fontSize: '12px', color: '#999' }}>Additional info</span>
+      </div>
+    }
+    width={400}
+    height={200}
+  >
+    {(innerwidth, innerheight) => {
+      return (
+        <div
+          style={{
+            width: innerwidth,
+            height: innerheight,
+            background: 'rgba(230,0,0,0.05)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          Content
+        </div>
+      );
+    }}
+  </PanelChrome>
+</ExampleFrame>
+
+### Collapsible
+
+The panel can be collapsed/expanded by clicking on the chevron or the title.
+
+> _Note: `collapsible` and `hoverHeader` props are mutually exclusive and cannot be used in the same panel._
+
+```tsx
+function Container() {
+  const [isCollapsed, setCollapsed] = useState(true);
+
+  return (
+    <PanelChrome
+      title="My awesome panel title"
+      width={400}
+      height={200}
+      collapsible={true}
+      collapsed={isCollapsed}
+      onToggleCollapse={(isCollapsed) => setCollapsed(isCollapsed)}
+    >
+      {(innerwidth, innerheight) => {
+        return (
+          <div
+            style={{
+              width: innerwidth,
+              height: innerheight,
+              background: 'rgba(230,0,0,0.05)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            Content
+          </div>
+        );
+      }}
+    </PanelChrome>
+  );
+}
+```
+
+<ExampleFrame>
+  <PanelChrome title="My awesome panel title" width={400} height={200} collapsible={true}>
+    {(innerwidth, innerheight) => {
+      return (
+        <div
+          style={{
+            width: innerwidth,
+            height: innerheight,
+            background: 'rgba(230,0,0,0.05)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          Content
+        </div>
+      );
+    }}
+  </PanelChrome>
+</ExampleFrame>

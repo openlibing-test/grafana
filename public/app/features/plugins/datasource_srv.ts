@@ -1,0 +1,391 @@
+import {
+  type DataSourceApi,
+  type DataSourceInstanceSettings,
+  type DataSourceRef,
+  type ScopedVars,
+  isObject,
+  matchPluginId,
+} from '@grafana/data';
+import {
+  type DataSourceSrv as DataSourceService,
+  getBackendSrv,
+  type GetDataSourceListFilters,
+  getDataSourceSrv as getDataSourceService,
+  getTemplateSrv,
+  registerRuntimeDataSourceInstance,
+  type RuntimeDataSourceRegistration,
+  type TemplateSrv,
+  isExpressionReference,
+} from '@grafana/runtime';
+import {
+  clearPluginCache,
+  ExpressionDatasourceRef,
+  getCachedPlugin,
+  getRuntimePlugin,
+  loadDataSourceInstanceFromSettings,
+  syncDataSourceInstanceSettings,
+  syncDatasourcePluginMetas,
+} from '@grafana/runtime/internal';
+import { type DataQuery, type DataSourceJsonData } from '@grafana/schema';
+import config from 'app/core/config';
+import {
+  dataSource as expressionDatasource,
+  instanceSettings as expressionInstanceSettings,
+} from 'app/features/expressions/ExpressionDatasource';
+import { ExpressionDatasourceUID } from 'app/features/expressions/types';
+
+import { pluginImporter } from './importer/pluginImporter';
+
+export class DatasourceSrv implements DataSourceService {
+  private settingsMapByName: Record<string, DataSourceInstanceSettings> = {};
+  private settingsMapByUid: Record<string, DataSourceInstanceSettings> = {};
+  private settingsMapById: Record<string, DataSourceInstanceSettings> = {};
+  private defaultName = ''; // actually UID
+
+  constructor(private templateSrv: TemplateSrv = getTemplateSrv()) {}
+
+  init(settingsMapByName: Record<string, DataSourceInstanceSettings>, defaultName: string) {
+    // The plugin instance cache is shared with getDataSourceInstance(). Clear it here so that
+    // reload() never serves an instance built from the previous settings.
+    clearPluginCache();
+    this.settingsMapByUid = {};
+    this.settingsMapByName = settingsMapByName;
+    this.defaultName = defaultName;
+
+    for (const dsSettings of Object.values(settingsMapByName)) {
+      if (!dsSettings.uid) {
+        dsSettings.uid = dsSettings.name; // -- Grafana --, -- Mixed etc
+      }
+
+      this.settingsMapByUid[dsSettings.uid] = dsSettings;
+      if (dsSettings.id) {
+        this.settingsMapById[dsSettings.id] = dsSettings;
+      }
+    }
+
+    this.settingsMapByUid[ExpressionDatasourceRef.uid] = expressionInstanceSettings;
+    this.settingsMapByUid[ExpressionDatasourceUID] = expressionInstanceSettings;
+  }
+
+  // Checked here as well because this service always has the boot data; the async cache may not be filled yet.
+  registerRuntimeDataSource(entry: RuntimeDataSourceRegistration): void {
+    if (this.settingsMapByUid[entry.dataSource.uid]) {
+      throw new Error(`A data source with uid ${entry.dataSource.uid} has already been registered`);
+    }
+
+    registerRuntimeDataSourceInstance(entry);
+  }
+
+  getDataSourceSettingsByUid(uid: string): DataSourceInstanceSettings | undefined {
+    return getRuntimePlugin(uid)?.instanceSettings ?? this.settingsMapByUid[uid];
+  }
+
+  getInstanceSettings(
+    ref: string | null | undefined | DataSourceRef,
+    scopedVars?: ScopedVars
+  ): DataSourceInstanceSettings | undefined {
+    let nameOrUid = getNameOrUid(ref);
+
+    // Expressions has a new UID as __expr__ See: https://github.com/grafana/grafana/pull/62510/
+    // But we still have dashboards/panels with old expression UID (-100)
+    // To support both UIDs until we migrate them all to new one, this check is necessary
+    if (isExpressionReference(nameOrUid)) {
+      return expressionInstanceSettings;
+    }
+
+    if (nameOrUid === 'default' || nameOrUid == null) {
+      // Handle type-only datasource references (e.g., {type: 'prometheus'})
+      if (isDatasourceRef(ref) && ref.type) {
+        const ds = this.findDatasourceByType(ref.type);
+        if (ds) {
+          return ds;
+        }
+      }
+      // Fall back to default datasource if no type match found
+      return this.settingsMapByUid[this.defaultName] ?? this.settingsMapByName[this.defaultName];
+    }
+
+    // Complex logic to support template variable data source names
+    // For this we just pick the current or first data source in the variable
+    if (nameOrUid[0] === '$') {
+      const interpolatedName = this.templateSrv.replace(nameOrUid, scopedVars, variableInterpolation);
+
+      let dsSettings;
+
+      if (interpolatedName === 'default') {
+        dsSettings = this.settingsMapByName[this.defaultName];
+      } else {
+        dsSettings = this.getDataSourceSettingsByUid(interpolatedName) ?? this.settingsMapByName[interpolatedName];
+      }
+
+      if (!dsSettings) {
+        return undefined;
+      }
+
+      // Return an instance with un-interpolated values for name and uid
+      return {
+        ...dsSettings,
+        isDefault: false,
+        name: nameOrUid,
+        uid: nameOrUid,
+        rawRef: { type: dsSettings.type, uid: dsSettings.uid },
+      };
+    }
+
+    return (
+      this.getDataSourceSettingsByUid(nameOrUid) ?? this.settingsMapByName[nameOrUid] ?? this.settingsMapById[nameOrUid]
+    );
+  }
+
+  get(ref?: string | DataSourceRef | null, scopedVars?: ScopedVars): Promise<DataSourceApi> {
+    let nameOrUid = getNameOrUid(ref);
+    if (!nameOrUid) {
+      // Handle type-only datasource references
+      if (isDatasourceRef(ref) && ref.type) {
+        const ds = this.findDatasourceByType(ref.type);
+        if (!ds) {
+          return Promise.reject('no datasource of type');
+        }
+        return this.get(ds.uid);
+      }
+      return this.get(this.defaultName);
+    }
+
+    if (isExpressionReference(ref)) {
+      return Promise.resolve(expressionDataSourceApi);
+    }
+
+    // Check if nameOrUid matches a uid and then get the name
+    const byName = this.settingsMapByName[nameOrUid];
+    if (byName) {
+      nameOrUid = byName.uid;
+    }
+
+    // This check is duplicated below, this is here mainly as performance optimization to skip interpolation
+    const cached = this.getCachedInstance(nameOrUid);
+    if (cached) {
+      return Promise.resolve(cached);
+    }
+
+    // Interpolation here is to support template variable in data source selection
+    nameOrUid = this.templateSrv.replace(nameOrUid, scopedVars, variableInterpolation);
+
+    if (nameOrUid === 'default' && this.defaultName !== 'default') {
+      return this.get(this.defaultName);
+    }
+
+    const interpolatedCached = this.getCachedInstance(nameOrUid);
+    if (interpolatedCached) {
+      return Promise.resolve(interpolatedCached);
+    }
+
+    return this.loadDatasource(nameOrUid);
+  }
+
+  private getCachedInstance(uid: string): DataSourceApi | undefined {
+    if (isExpressionReference(uid)) {
+      return expressionDataSourceApi;
+    }
+    // Runtime-registered data sources live in the same shared cache.
+    return getCachedPlugin(uid);
+  }
+
+  /**
+   * Finds the best datasource instance settings for a given type.
+   * Prefers the default datasource of that type, otherwise returns the first one found.
+   */
+  private findDatasourceByType(type: string): DataSourceInstanceSettings | undefined {
+    const settings = this.getList({ type });
+    if (!settings?.length) {
+      return undefined;
+    }
+    return settings.find((v) => v.isDefault) ?? settings[0];
+  }
+
+  async loadDatasource(key: string): Promise<DataSourceApi> {
+    const cached = this.getCachedInstance(key);
+    if (cached) {
+      return Promise.resolve(cached);
+    }
+
+    // find the metadata
+    const instanceSettings = this.getInstanceSettings(key);
+    if (!instanceSettings) {
+      return Promise.reject({ message: `Datasource ${key} was not found` });
+    }
+
+    try {
+      return await loadDataSourceInstanceFromSettings(instanceSettings, (meta) =>
+        pluginImporter.importDataSource(meta)
+      );
+    } catch {
+      // The shared loader already logged the failure and showed the "plugin failed" alert.
+      return Promise.reject({ message: `Datasource: ${key} was not found` });
+    }
+  }
+
+  getAll(): DataSourceInstanceSettings[] {
+    return Object.values(this.settingsMapByName);
+  }
+
+  getList(filters: GetDataSourceListFilters = {}): DataSourceInstanceSettings[] {
+    const base = Object.values(this.settingsMapByName).filter((x) => {
+      if (x.meta.id === 'grafana' || x.meta.id === 'mixed' || x.meta.id === 'dashboard') {
+        return false;
+      }
+      if (filters.metrics && !x.meta.metrics) {
+        return false;
+      }
+      if (filters.tracing && !x.meta.tracing) {
+        return false;
+      }
+      if (filters.logs && x.meta.category !== 'logging' && !x.meta.logs) {
+        return false;
+      }
+      if (filters.annotations && !x.meta.annotations) {
+        return false;
+      }
+      if (filters.alerting && !x.meta.alerting) {
+        return false;
+      }
+      if (filters.pluginId && !matchPluginId(filters.pluginId, x.meta)) {
+        return false;
+      }
+      if (filters.filter && !filters.filter(x)) {
+        return false;
+      }
+      if (filters.type) {
+        if (Array.isArray(filters.type)) {
+          if (!filters.type.includes(x.type)) {
+            return false;
+          }
+        } else if (!(x.type === filters.type || x.meta.aliasIDs?.includes(filters.type!))) {
+          return false;
+        }
+      }
+      if (
+        !filters.all &&
+        x.meta.metrics !== true &&
+        x.meta.annotations !== true &&
+        x.meta.tracing !== true &&
+        x.meta.logs !== true &&
+        x.meta.alerting !== true
+      ) {
+        return false;
+      }
+      return true;
+    });
+
+    if (filters.variables) {
+      for (const variable of this.templateSrv.getVariables()) {
+        if (variable.type !== 'datasource') {
+          continue;
+        }
+        let dsValue = variable.current.value === 'default' ? this.defaultName : variable.current.value;
+        // Support for multi-value DataSource (ds) variables
+        if (Array.isArray(dsValue)) {
+          // If the ds variable have multiple selected datasources
+          // We will use the first one
+          dsValue = dsValue[0];
+        }
+        const dsSettings =
+          !Array.isArray(dsValue) && (this.settingsMapByName[dsValue] || this.getDataSourceSettingsByUid(dsValue));
+
+        if (dsSettings) {
+          const key = `$\{${variable.name}\}`;
+          base.push({
+            ...dsSettings,
+            isDefault: false,
+            name: key,
+            uid: key,
+          });
+        }
+      }
+    }
+
+    const sorted = base.sort((a, b) => {
+      if (a.name.toLowerCase() > b.name.toLowerCase()) {
+        return 1;
+      }
+      if (a.name.toLowerCase() < b.name.toLowerCase()) {
+        return -1;
+      }
+      return 0;
+    });
+
+    if (!filters.pluginId && !filters.alerting) {
+      if (filters.mixed) {
+        const mixedInstanceSettings = this.getInstanceSettings('-- Mixed --');
+        if (mixedInstanceSettings) {
+          base.push(mixedInstanceSettings);
+        }
+      }
+
+      if (filters.dashboard) {
+        const dashboardInstanceSettings = this.getInstanceSettings('-- Dashboard --');
+        if (dashboardInstanceSettings) {
+          base.push(dashboardInstanceSettings);
+        }
+      }
+
+      if (!filters.tracing) {
+        const grafanaInstanceSettings = this.getInstanceSettings('-- Grafana --');
+        if (grafanaInstanceSettings && filters.filter?.(grafanaInstanceSettings) !== false) {
+          base.push(grafanaInstanceSettings);
+        }
+      }
+    }
+
+    return sorted;
+  }
+
+  /** `payload` is an already-fetched `/api/frontend/settings`, so the reload sends no request. */
+  async reload(payload?: ReloadPayload) {
+    const settings = payload ?? (await getBackendSrv().get<ReloadPayload>('/api/frontend/settings'));
+    // eslint-disable-next-line @grafana/no-config-datasources -- reload() intentionally refreshes boot data for legacy sync consumers
+    config.datasources = settings.datasources;
+    config.defaultDatasource = settings.defaultDatasource;
+    this.init(settings.datasources, settings.defaultDatasource);
+    syncDatasourcePluginMetas(settings);
+    // Keep the new async instance-settings cache in sync with the legacy srv during the
+    // transition where both exist. The boot source reuses the payload just fetched.
+    await syncDataSourceInstanceSettings({
+      datasources: settings.datasources,
+      defaultDatasource: settings.defaultDatasource,
+    });
+  }
+}
+
+const expressionDataSourceApi = expressionDatasource as DataSourceApi<DataQuery, DataSourceJsonData, {}>;
+
+export function getNameOrUid(ref?: string | DataSourceRef | null): string | undefined {
+  if (isExpressionReference(ref)) {
+    return ExpressionDatasourceRef.uid;
+  }
+
+  const isString = typeof ref === 'string';
+  return isString ? ref : ref?.uid;
+}
+
+function variableInterpolation<T>(value: T | T[]) {
+  if (Array.isArray(value)) {
+    return value[0];
+  }
+  return value;
+}
+
+const isDatasourceRef = (ref: string | DataSourceRef | null | undefined): ref is DataSourceRef => {
+  if (ref && isObject(ref) && 'type' in ref) {
+    return true;
+  }
+  return false;
+};
+
+interface ReloadPayload {
+  datasources: Record<string, DataSourceInstanceSettings>;
+  defaultDatasource: string;
+}
+
+export const getDatasourceSrv = (): DatasourceSrv => {
+  return getDataSourceService() as DatasourceSrv;
+};

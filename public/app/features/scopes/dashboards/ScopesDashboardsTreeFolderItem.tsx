@@ -1,0 +1,170 @@
+import { css } from '@emotion/css';
+
+import { type GrafanaTheme2 } from '@grafana/data';
+import { t } from '@grafana/i18n';
+import { useFlagGrafanaVisualDesignRefresh } from '@grafana/runtime/internal';
+import { Icon, IconButton, Spinner, useStyles2 } from '@grafana/ui';
+
+import { useScopesServices } from '../ScopesContextProvider';
+
+import { ScopesDashboardsTree } from './ScopesDashboardsTree';
+import { type OnFolderUpdate, type SuggestedNavigationsFolder, type SuggestedNavigationsFoldersMap } from './types';
+
+export interface ScopesDashboardsTreeFolderItemProps {
+  folder: SuggestedNavigationsFolder;
+  folderPath: string[];
+  folders: SuggestedNavigationsFoldersMap;
+  onFolderUpdate: OnFolderUpdate;
+  /** Inherited from a parent ChildScope folder; used by group folders that have no subScopeName of their own. */
+  subScope?: string;
+  subScopePath?: string[];
+  /** Called after a navigation link is clicked, e.g. so an overlay nav menu can close itself. */
+  onNavigate?: () => void;
+  /** Whether this item is rendered inside the mega menu section rather than the legacy standalone
+   * docked drawer. Gates the color styles that match the regular mega-menu nav items, so the old
+   * drawer (which renders this same component) keeps its original, unstyled look. */
+  megaMenuStyle?: boolean;
+}
+
+export function ScopesDashboardsTreeFolderItem({
+  subScope,
+  subScopePath,
+  folder,
+  folderPath,
+  folders,
+  onFolderUpdate,
+  onNavigate,
+  megaMenuStyle,
+}: ScopesDashboardsTreeFolderItemProps) {
+  const visualRefreshEnabled = useFlagGrafanaVisualDesignRefresh();
+  const styles = useStyles2(getStyles, megaMenuStyle, visualRefreshEnabled);
+
+  // get scopesselector service
+  const scopesSelectorService = useScopesServices()?.scopesSelectorService ?? undefined;
+  const scopesDashboardsService = useScopesServices()?.scopesDashboardsService ?? undefined;
+  return (
+    <div className={styles.container} role="treeitem" aria-selected={folder.expanded}>
+      <div className={styles.row}>
+        <button
+          className={styles.expand}
+          data-testid={`scopes-dashboards-${folder.title}-expand`}
+          aria-label={
+            folder.expanded ? t('scopes.dashboards.collapse', 'Collapse') : t('scopes.dashboards.expand', 'Expand')
+          }
+          onClick={() => {
+            onFolderUpdate(folderPath, !folder.expanded);
+          }}
+        >
+          <Icon name={!folder.expanded ? 'angle-right' : 'angle-down'} className={styles.icon} />
+
+          <span className={styles.titleContainer}>{folder.title}</span>
+          {folder.loading && <Spinner inline size="sm" className={styles.loadingIcon} />}
+        </button>
+
+        {folder.subScopeName && !folder.disableSubScopeSelection && (
+          <IconButton
+            className={styles.exchangeIcon}
+            tooltip={t('scopes.dashboards.exchange', 'Change root scope to {{scope}}', {
+              scope: folder.subScopeName || '',
+            })}
+            name="exchange-alt"
+            onClick={async (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              if (folder.subScopeName && scopesSelectorService) {
+                const activeSubScopePath = scopesDashboardsService?.state.navScopePath;
+                // Check if the active scope is a child of the current folder's scope
+                const activeScope = activeSubScopePath?.[activeSubScopePath.length - 1];
+                const folderLocationInActivePath = activeSubScopePath?.indexOf(folder.subScopeName) ?? -1;
+
+                await scopesDashboardsService?.setNavigationScope(
+                  folderLocationInActivePath >= 0 ? folder.subScopeName : undefined,
+                  undefined,
+                  activeSubScopePath?.slice(folderLocationInActivePath + 1) ?? []
+                );
+                // Now changeScopes will skip fetchDashboards because navigationScope is set
+                scopesSelectorService.changeScopes(
+                  folderLocationInActivePath >= 0 && activeScope ? [activeScope] : [folder.subScopeName],
+                  undefined,
+                  undefined,
+                  false
+                );
+              }
+            }}
+          />
+        )}
+      </div>
+
+      {folder.expanded && (
+        <div className={styles.children}>
+          <ScopesDashboardsTree
+            subScopePath={subScopePath}
+            subScope={folder.subScopeName ?? subScope}
+            folders={folders}
+            folderPath={folderPath}
+            onFolderUpdate={onFolderUpdate}
+            onNavigate={onNavigate}
+            megaMenuStyle={megaMenuStyle}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+const getStyles = (theme: GrafanaTheme2, megaMenuStyle?: boolean, visualRefreshEnabled?: boolean) => {
+  return {
+    container: css({
+      display: 'flex',
+      flexDirection: 'column',
+      padding: theme.spacing(0.5, 0),
+    }),
+    row: css({
+      display: 'flex',
+      alignItems: 'flex-start',
+      gap: theme.spacing(1),
+      width: '100%',
+    }),
+    expand: css({
+      alignItems: 'flex-start',
+      background: 'none',
+      border: 0,
+      display: 'flex',
+      gap: theme.spacing(1),
+      margin: 0,
+      padding: 0,
+      textAlign: 'left',
+      wordBreak: 'break-word',
+      flex: 1,
+    }),
+    // Matches the regular nav items' icon tint (MegaMenuItem.tsx) so this tree's icons read as part
+    // of the same nav rather than a visually distinct drawer transplant. Mega-menu-only - the legacy
+    // standalone drawer (which renders this same component) keeps its original, unstyled look.
+    icon: css({
+      marginTop: theme.spacing(0.25),
+      color: megaMenuStyle && visualRefreshEnabled ? theme.colors.accent.text : undefined,
+    }),
+    // Matches the regular nav items' base (non-active) text color (MegaMenuItemText.tsx). Mega-menu-only.
+    titleContainer: css({
+      display: 'flex',
+      alignItems: 'center',
+      flex: 1,
+      color: megaMenuStyle ? theme.colors.text.secondary : undefined,
+    }),
+    exchangeIcon: css({
+      opacity: 0.7,
+      flexShrink: 0,
+      marginTop: theme.spacing(0.25),
+    }),
+    loadingIcon: css({
+      flexShrink: 0,
+      marginLeft: theme.spacing(0.5),
+      marginTop: theme.spacing(0.25),
+    }),
+    children: css({
+      paddingLeft: theme.spacing(2),
+      marginLeft: theme.spacing(1),
+      borderLeft: `1px solid ${theme.colors.border.weak}`,
+    }),
+  };
+};

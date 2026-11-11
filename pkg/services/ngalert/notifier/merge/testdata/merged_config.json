@@ -1,0 +1,244 @@
+{
+  "alertmanager_config": {
+    "route": {
+      "receiver": "grafana-default-email",
+      "group_by": [
+        "test",
+        "test2"
+      ],
+      "routes": [
+        {
+          "receiver": "test-webhook",
+          "group_by": [
+            "teste",
+            "test2f"
+          ],
+          "object_matchers": [
+            [
+              "team",
+              "=",
+              "teamC"
+            ]
+          ],
+          "mute_time_intervals": [
+            "mti-1"
+          ],
+          "active_time_intervals": [
+            "ti-1"
+          ],
+          "group_wait": "0s",
+          "group_interval": "1m",
+          "repeat_interval": "1m"
+        }
+      ],
+      "group_wait": "1m",
+      "group_interval": "1m",
+      "repeat_interval": "1m"
+    },
+    "inhibit_rules": [
+      {
+        "source_matchers": [
+          "alertname=\"test\"",
+          "cluster=\"test1\""
+        ],
+        "target_matchers": [
+          "alertname=\"test2\"",
+          "cluster=\"test1\""
+        ],
+        "equal": [
+          "namespace"
+        ]
+      }
+    ],
+    "time_intervals": [
+      {
+        "uid": "brmsc0nuyaadpb3ob2onl9mwm",
+        "name": "mti-1",
+        "time_intervals": [
+          {
+            "times": [
+              {
+                "start_time": "00:00",
+                "end_time": "12:00"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "uid": "dphipr9md4erhvovlqlyovqmj",
+        "name": "mti-2",
+        "time_intervals": [
+          {
+            "times": [
+              {
+                "start_time": "00:00",
+                "end_time": "12:00"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "uid": "dzo4w18a2z4z70ucpyqsu36if",
+        "name": "ti-1",
+        "time_intervals": [
+          {
+            "weekdays": [
+              "saturday",
+              "sunday"
+            ]
+          }
+        ]
+      },
+      {
+        "uid": "9g8b1a5jnk04f8qlt7cnmkn1v",
+        "name": "ti-2",
+        "time_intervals": [
+          {
+            "weekdays": [
+              "monday",
+              "tuesday",
+              "wednesday",
+              "thursday",
+              "friday"
+            ]
+          }
+        ]
+      }
+    ],
+    "receivers": [
+      {
+        "uid": "65zh0p44jhgxm3w4ws75t37bw",
+        "name": "grafana-default-email",
+        "grafana_managed_receiver_configs": [
+          {
+            "uid": "uxwfZvtnz",
+            "name": "",
+            "type": "email",
+            "disableResolveMessage": false,
+            "settings": {
+              "addresses": "<example@example.com>"
+            }
+          }
+        ]
+      },
+      {
+        "uid": "7lf1r37mdkednztvx9t1wmsy0",
+        "name": "recv",
+        "grafana_managed_receiver_configs": [
+          {
+            "uid": "eeae77c45c45175d",
+            "name": "recv",
+            "type": "email",
+            "version": "v0mimir1",
+            "disableResolveMessage": false,
+            "settings": {
+              "send_resolved": false,
+              "to": "recv",
+              "from": "email@example.com",
+              "hello": "localhost",
+              "smarthost": "smtp.example.org:587",
+              "html": "{{ template \"email.default.html\" . }}",
+              "require_tls": true,
+              "tls_config": {
+                "insecure_skip_verify": false
+              }
+            }
+          }
+        ]
+      },
+      {
+        "uid": "0hwmwvyol0am2fgzxv7xnvvd0",
+        "name": "recv2",
+        "grafana_managed_receiver_configs": [
+          {
+            "uid": "93fe2d5b1c9b65ac",
+            "name": "recv2",
+            "type": "webhook",
+            "version": "v0mimir1",
+            "disableResolveMessage": false,
+            "settings": {
+              "send_resolved": true,
+              "http_config": {
+                "tls_config": {
+                  "insecure_skip_verify": false
+                },
+                "follow_redirects": true,
+                "enable_http2": true,
+                "proxy_url": null
+              },
+              "url": "http://localhost",
+              "max_alerts": 0,
+              "timeout": "0s"
+            }
+          }
+        ]
+      },
+      {
+        "uid": "dfyn81rq1op9zn05ezfbndf6c",
+        "name": "test-webhook",
+        "grafana_managed_receiver_configs": [
+          {
+            "uid": "12345",
+            "name": "",
+            "type": "webhook",
+            "disableResolveMessage": false,
+            "settings": {
+              "url": "http://localhost/api/v1/alerts"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "managed_routes": {
+    "mimir-12345": {
+      "receiver": "recv",
+      "group_by": [
+        "alertname",
+        "groupby"
+      ],
+      "routes": [
+        {
+          "receiver": "recv2",
+          "group_by": [
+            "teste",
+            "test2f"
+          ],
+          "matchers": [
+            "team=\"teamC\""
+          ],
+          "mute_time_intervals": [
+            "mti-2"
+          ],
+          "active_time_intervals": [
+            "ti-2"
+          ],
+          "group_wait": "0s",
+          "group_interval": "1m",
+          "repeat_interval": "1m"
+        }
+      ],
+      "group_wait": "1m5s",
+      "group_interval": "20m",
+      "repeat_interval": "10h"
+    }
+  },
+  "managed_inhibition_rules": {
+    "a1d38b33ebc9330": {
+      "name": "a1d38b33ebc9330",
+      "source_matchers": [
+        "alertname=\"test\"",
+        "__grafana_managed_route__=\"mimir-12345\""
+      ],
+      "target_matchers": [
+        "servicename=\"test2\"",
+        "__grafana_managed_route__=\"mimir-12345\""
+      ],
+      "equal": [
+        "namespace"
+      ]
+    }
+  }
+}

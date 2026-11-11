@@ -1,0 +1,272 @@
+import {
+  type AdHocFilterWithLabels as SceneAdHocFilterWithLabels,
+  type MultiValueVariable,
+  type SceneObject,
+  type SceneVariables,
+  sceneUtils,
+} from '@grafana/scenes';
+import {
+  type VariableModel,
+  VariableRefresh as OldVariableRefresh,
+  VariableHide as OldVariableHide,
+  VariableSort as OldVariableSort,
+} from '@grafana/schema';
+import { type VariableOption, type AdHocFilterWithLabels } from '@grafana/schema/apis/dashboard.grafana.app/v2';
+
+import { getIntervalsQueryFromNewIntervalModel } from '../utils/getIntervalsQueryFromNewIntervalModel';
+
+import { normalizeDataSourceRef } from './normalizeDataSourceRef';
+
+/**
+ * Converts a SceneVariables object into an array of VariableModel objects.
+ * @param set - The SceneVariables object containing the variables to convert.
+ * @param keepQueryOptions - (Optional) A boolean flag indicating whether to keep the options for query variables.
+ *                           This should be set to `false` when variables are saved in the dashboard model,
+ *                           but should be set to `true` when variables are used in the templateSrv to keep them in sync.
+ *                           If `true`, the options for query variables are kept.
+ * @param excludeVariable - (Optional) Scene variable instance to omit. Is used to avoid self-reference in that variable's editor.
+ *                          e.g when editing it as a section variable.
+ *
+ *
+ *  */
+
+export function sceneVariablesSetToVariables(
+  set: SceneVariables,
+  keepQueryOptions?: boolean,
+  excludedVariable?: SceneObject,
+  /** Include variables with `origin` (e.g. predefined global/folder). Default excludes them for persistence. */
+  includeRuntimeVariables?: boolean
+) {
+  const variables: VariableModel[] = [];
+
+  for (const variable of set.state.variables) {
+    if (excludedVariable !== undefined && variable === excludedVariable) {
+      continue;
+    }
+    // Skipping default / predefined variables unless the caller wants runtime listing
+    // (Default variables don't get persisted to the JSON schema.)
+    if (!includeRuntimeVariables && variable.state.origin !== undefined) {
+      continue;
+    }
+
+    const commonProperties = {
+      name: variable.state.name,
+      label: variable.state.label,
+      description: variable.state.description ?? undefined,
+      skipUrlSync: Boolean(variable.state.skipUrlSync),
+      hide: variable.state.hide || OldVariableHide.dontHide,
+      type: variable.state.type,
+    };
+
+    if (sceneUtils.isQueryVariable(variable)) {
+      let options: VariableOption[] = [];
+      if (keepQueryOptions) {
+        options = variableValueOptionsToVariableOptions(variable.state);
+      }
+      const datasource = normalizeDataSourceRef(variable.state.datasource);
+      const variableObj: VariableModel = {
+        ...commonProperties,
+        current: {
+          // @ts-expect-error
+          value: variable.state.value,
+          // @ts-expect-error
+          text: variable.state.text,
+        },
+        options,
+        query: variable.state.query,
+        definition: variable.state.definition,
+        sort: variable.state.sort,
+        refresh: variable.state.refresh,
+        regex: variable.state.regex,
+        regexApplyTo: variable.state.regexApplyTo,
+        allValue: variable.state.allValue,
+        includeAll: variable.state.includeAll,
+        multi: variable.state.isMulti,
+        ...(variable.state.allowCustomValue !== undefined && { allowCustomValue: variable.state.allowCustomValue }),
+        skipUrlSync: variable.state.skipUrlSync,
+        staticOptions: variable.state.staticOptions?.map((option) => ({
+          text: option.label,
+          value: String(option.value),
+          ...(option.properties && { properties: option.properties }),
+        })),
+        staticOptionsOrder: variable.state.staticOptionsOrder,
+      };
+      // Only add datasource if it exists and is not empty
+      if (datasource && Object.keys(datasource).length > 0 && (datasource.uid || datasource.type)) {
+        variableObj.datasource = datasource;
+      }
+      variables.push(variableObj);
+    } else if (sceneUtils.isCustomVariable(variable)) {
+      let options: VariableOption[] = [];
+      if (keepQueryOptions) {
+        options = variableValueOptionsToVariableOptions(variable.state);
+      }
+      const customVariable: VariableModel = {
+        ...commonProperties,
+        current: {
+          // @ts-expect-error
+          text: variable.state.value,
+          // @ts-expect-error
+          value: variable.state.value,
+        },
+        options,
+        query: variable.state.query,
+        multi: variable.state.isMulti,
+        allValue: variable.state.allValue,
+        includeAll: variable.state.includeAll,
+        ...(variable.state.allowCustomValue !== undefined && { allowCustomValue: variable.state.allowCustomValue }),
+        // Ensure we persist the backend default when not specified to stay aligned with
+        // transformSaveModelSchemaV2ToScene which injects 'csv' on load.
+        valuesFormat: variable.state.valuesFormat ?? 'csv',
+      };
+      variables.push(customVariable);
+    } else if (sceneUtils.isDataSourceVariable(variable)) {
+      variables.push({
+        ...commonProperties,
+        current: {
+          // @ts-expect-error
+          value: variable.state.value,
+          // @ts-expect-error
+          text: variable.state.text,
+        },
+        options: [],
+        regex: variable.state.regex,
+        refresh: OldVariableRefresh.onDashboardLoad,
+        query: variable.state.pluginId,
+        multi: variable.state.isMulti,
+        allValue: variable.state.allValue,
+        includeAll: variable.state.includeAll,
+        ...(variable.state.allowCustomValue !== undefined && { allowCustomValue: variable.state.allowCustomValue }),
+      });
+    } else if (sceneUtils.isConstantVariable(variable)) {
+      variables.push({
+        ...commonProperties,
+        type: 'constant', // Explicitly set type to constant
+        current: {
+          // @ts-expect-error
+          value: variable.state.value,
+          // @ts-expect-error
+          text: variable.state.value,
+        },
+        // @ts-expect-error
+        query: variable.state.value,
+        hide: OldVariableHide.hideVariable,
+      });
+    } else if (sceneUtils.isIntervalVariable(variable)) {
+      const intervals = getIntervalsQueryFromNewIntervalModel(variable.state.intervals);
+      variables.push({
+        ...commonProperties,
+        current: {
+          text: variable.state.value,
+          value: variable.state.value,
+        },
+        query: intervals,
+        // V2 schema mandates refresh: "onTimeRangeChanged" for interval variables,
+        // which maps to OldVariableRefresh.onTimeRangeChanged (2) in V1
+        refresh: variable.state.refresh ?? OldVariableRefresh.onTimeRangeChanged,
+        options: variable.state.intervals.map((interval) => ({
+          value: interval,
+          text: interval,
+          selected: interval === variable.state.value,
+        })),
+        // @ts-expect-error ?? how to fix this without adding the ts-expect-error
+        auto: variable.state.autoEnabled,
+        auto_min: variable.state.autoMinInterval,
+        auto_count: variable.state.autoStepCount,
+      });
+    } else if (sceneUtils.isTextBoxVariable(variable)) {
+      const current = {
+        text: variable.state.value,
+        value: variable.state.value,
+      };
+
+      variables.push({
+        ...commonProperties,
+        current,
+        options: [{ ...current, selected: true }],
+        query: variable.state.value,
+      });
+    } else if (sceneUtils.isAdHocVariable(variable)) {
+      const adhocVariable: VariableModel = {
+        ...commonProperties,
+        datasource: variable.state.datasource,
+        // @ts-expect-error
+        baseFilters: variable.state.baseFilters || [],
+        filters: [
+          ...validateFiltersOrigin(variable.getOriginalFilters()).map(
+            ({ key, operator, value, values, keyLabel, valueLabels, origin }) => {
+              return { key, origin, value, values, valueLabels, keyLabel, operator };
+            }
+          ),
+          ...validateFiltersOrigin(variable.state.filters),
+        ],
+        defaultKeys: variable.state.defaultKeys,
+        ...(variable.state.allowCustomValue !== undefined && { allowCustomValue: variable.state.allowCustomValue }),
+        enableGroupBy: variable.state.enableGroupBy ?? false,
+      };
+      variables.push(adhocVariable);
+    } else if (sceneUtils.isSwitchVariable(variable)) {
+      variables.push({
+        ...commonProperties,
+        current: {
+          value: variable.state.value,
+          text: variable.state.value,
+        },
+        options: [
+          {
+            value: variable.state.enabledValue,
+            text: variable.state.enabledValue,
+          },
+          {
+            value: variable.state.disabledValue,
+            text: variable.state.disabledValue,
+          },
+        ],
+      });
+    } else if (variable.state.type === 'system' || variable.state.type === 'snapshot') {
+      // Not persisted. Snapshot variables are read-only frozen values; the scene graph
+      // interpolates them directly, so there is nothing to serialize here.
+    } else {
+      throw new Error('Unsupported variable type: ' + variable.state.type);
+    }
+  }
+
+  // Remove some defaults
+  for (const variable of variables) {
+    if (variable.hide === OldVariableHide.dontHide) {
+      delete variable.hide;
+    }
+
+    if (!variable.skipUrlSync) {
+      delete variable.skipUrlSync;
+    }
+
+    if (variable.label === '') {
+      delete variable.label;
+    }
+
+    if (!variable.multi) {
+      delete variable.multi;
+    }
+
+    if (variable.sort === OldVariableSort.disabled) {
+      delete variable.sort;
+    }
+  }
+
+  return variables;
+}
+
+export function variableValueOptionsToVariableOptions(varState: MultiValueVariable['state']): VariableOption[] {
+  return varState.options.map((o) => ({
+    value: String(o.value),
+    text: o.label,
+    selected: Array.isArray(varState.value) ? varState.value.includes(o.value) : varState.value === o.value,
+    ...(o.properties && { properties: o.properties }),
+  }));
+}
+
+export function validateFiltersOrigin(filters?: SceneAdHocFilterWithLabels[]): AdHocFilterWithLabels[] {
+  // Only keep dashboard originated filters in the schema
+  return filters?.filter((f): f is AdHocFilterWithLabels => !f.origin || f.origin === 'dashboard') || [];
+}

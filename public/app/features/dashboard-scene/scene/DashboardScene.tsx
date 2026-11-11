@@ -1,0 +1,2551 @@
+import type * as H from 'history';
+import { isEqual, isPlainObject } from 'lodash';
+import { type Unsubscribable } from 'rxjs';
+
+import {
+  CoreApp,
+  generateUUID,
+  type DataQueryRequest,
+  type FieldConfig,
+  type FieldConfigSource,
+  filterFieldConfigOverrides,
+  isStandardFieldProp,
+  locationUtil,
+  type NavIndex,
+  type NavModelItem,
+  store,
+} from '@grafana/data';
+import { t } from '@grafana/i18n';
+import { config, getDataSourceSrv, locationService, RefreshEvent, reportInteraction } from '@grafana/runtime';
+import { FlagKeys, getFeatureFlagClient, getPanelPluginMeta } from '@grafana/runtime/internal';
+import {
+  type CancelActivationHandler,
+  SceneDataTransformer,
+  sceneGraph,
+  type SceneObject,
+  SceneObjectBase,
+  type SceneObjectRef,
+  SceneQueryRunner,
+  SceneTimeRange,
+  sceneUtils,
+  type SceneVariable,
+  type SceneVariableDependencyConfigLike,
+  MultiValueVariable,
+  NewSceneObjectAddedEvent,
+  type VizPanel,
+} from '@grafana/scenes';
+import { type Dashboard, type DashboardLink, type LibraryPanel } from '@grafana/schema';
+import { type Spec as DashboardV2Spec, type VariableKind } from '@grafana/schema/apis/dashboard.grafana.app/v2';
+import { appEvents } from 'app/core/app_events';
+import { type ScrollRefElement } from 'app/core/components/NativeScrollbar';
+import { LS_PANEL_COPY_KEY, LS_STYLES_COPY_KEY } from 'app/core/constants';
+import { getNavModel } from 'app/core/selectors/navModel';
+import { sortedDeepCloneWithoutNulls } from 'app/core/utils/object';
+import { dashboardAPIVersionResolver } from 'app/features/dashboard/api/DashboardAPIVersionResolver';
+import { getDashboardAPI } from 'app/features/dashboard/api/dashboard_api';
+import { type DashboardWithAccessInfo } from 'app/features/dashboard/api/types';
+import { isDashboardNewLayoutsEnabled, isDashboardV2Spec } from 'app/features/dashboard/api/utils';
+import { type SaveDashboardAsOptions } from 'app/features/dashboard/components/SaveDashboard/types';
+import { DASHBOARD_LIBRARY_ROUTES } from 'app/features/dashboard/dashgrid/types';
+import { getDashboardSceneProfiler } from 'app/features/dashboard/services/DashboardProfiler';
+import { getDashboardSrv } from 'app/features/dashboard/services/DashboardSrv';
+import { PanelModel } from 'app/features/dashboard/state/PanelModel';
+import { type DecoratedRevisionModel } from 'app/features/dashboard/types/revisionModels';
+import {
+  keepRowInViewWhileLayoutSettles,
+  scrollToRow,
+} from 'app/features/dashboard-scene/scene/layout-rows/scrollToRow';
+import { dashboardWatcher } from 'app/features/live/dashboard/dashboardWatcher';
+import { type DashboardJson } from 'app/features/manage-dashboards/types';
+import { PROVISIONING_PREVIEW_URL } from 'app/features/provisioning/constants';
+import { type RecoverToNewBranch } from 'app/features/provisioning/types';
+import { createDefaultQuery } from 'app/features/query/state/queryDefaults';
+import { VariablesChanged } from 'app/features/variables/types';
+import { type DashboardDTO, type DashboardMeta, type SaveDashboardResponseDTO } from 'app/types/dashboard';
+import { DashboardDiscardedEvent, ShowConfirmModalEvent } from 'app/types/events';
+
+import {
+  AnnoKeyManagerAllowsEdits,
+  AnnoKeyManagerIdentity,
+  AnnoKeyManagerKind,
+  AnnoKeySourcePath,
+  AnnoKeyUseCrossDashboardVariables,
+  ManagerKind,
+  type ResourceForCreate,
+} from '../../apiserver/types';
+import { duplicatePanel } from '../actions/layout/duplicatePanel';
+import { edit } from '../actions/utils/edit';
+import { type ComposerSession } from '../composer/ComposerSession';
+import { clearPendingComposerEnterRequest } from '../composer/composerEntryRequests';
+import { getLifecycleBreadcrumbLabel } from '../lifecycle/lifecycle';
+import {
+  getPendingChangePreview,
+  getPendingChangesHistory,
+  getScenePendingChangePreview,
+  previewedDashboardUid,
+  proposesNewDashboard,
+} from '../lifecycle/pendingChangePreview';
+import {
+  hasUnrecordedPendingChange,
+  recordPendingChange,
+  startRecordingPendingChanges,
+} from '../lifecycle/pendingChangesHistory';
+import { createMutationClient } from '../mutation-api/clientBridge';
+import { DashboardSceneChangeTracker } from '../saving/DashboardSceneChangeTracker';
+import { type DashboardChangeInfo, isNewDashboard } from '../saving/shared';
+import {
+  type DashboardSceneSerializerLike,
+  getDashboardSceneSerializer,
+  V2DashboardSerializer,
+} from '../serialization/DashboardSceneSerializer';
+import { serializeAutoGridItem } from '../serialization/layoutSerializers/AutoGridLayoutSerializer';
+import { gridItemToGridLayoutItemKind } from '../serialization/layoutSerializers/DefaultGridLayoutSerializer';
+import { getElement } from '../serialization/layoutSerializers/utils';
+import { resolveLegacyDatasourceNames } from '../serialization/resolveLegacyDatasourceNames';
+import {
+  createSceneVariablesFromVariableKinds,
+  transformSaveModelSchemaV2ToScene,
+} from '../serialization/transformSaveModelSchemaV2ToScene';
+import { buildGridItemForPanel, transformSaveModelToScene } from '../serialization/transformSaveModelToScene';
+import { gridItemToPanel } from '../serialization/transformSceneToSaveModel';
+import { normalizeTransformation } from '../serialization/transformationCompat';
+import { getDashboardTemplateExtension } from '../settings/enterprise-components/DashboardTemplateExtension';
+import { DashboardSidebar } from '../sidebar/DashboardSidebar';
+import { DashboardStateChangedEvent } from '../sidebar/events';
+import { type DashboardSidebarState } from '../sidebar/types';
+import { DashboardModelCompatibilityWrapper } from '../utils/DashboardModelCompatibilityWrapper';
+import { clearDefaultQuery } from '../utils/clearDefaultQuery';
+import { isRepeatCloneOrChildOf } from '../utils/clone';
+import {
+  mayInjectAnyPredefinedVariables,
+  resolvePredefinedVariablesForDashboard,
+  type UseCrossDashboardVariables,
+} from '../utils/crossDashboardVariablesSelection';
+import {
+  type DashboardEditPeriodOutcome,
+  type DashboardEditSessionTracking,
+  type DashboardModeTrigger,
+  getEditActors,
+} from '../utils/dashboardModeTracking';
+import { dashboardSceneGraph } from '../utils/dashboardSceneGraph';
+import { djb2Hash } from '../utils/djb2Hash';
+import { getDashboardUrl } from '../utils/getDashboardUrl';
+import { getLayoutManagerFor } from '../utils/getLayoutManagerFor';
+import { DashboardInteractions } from '../utils/interactions';
+import {
+  isEditEntryBlocked,
+  isMobileEditDeprecated,
+  notifyMobileEditNotAvailable,
+  redirectAwayFromMobileEdit,
+} from '../utils/mobileEditDeprecation';
+import { getPanelStyleConfig, type PanelStyleConfig } from '../utils/panelStyleConfigs';
+import { persistUseCrossDashboardVariables } from '../utils/persistUseCrossDashboardVariables';
+import { fetchPredefinedVariables, isPredefinedOrigin } from '../utils/predefinedVariables';
+import { getEmptyQueryRunnerState } from '../utils/queryRunnerState';
+import {
+  getClosestVizPanel,
+  getDashboardSceneFor,
+  getDefaultVizPanel,
+  getLayoutForObject,
+  hasActualSaveChanges,
+  isLibraryPanel,
+} from '../utils/utils';
+import { getPanelIdForVizPanel } from '../utils/utils-panels';
+
+import { AddLibraryPanelDrawer } from './AddLibraryPanelDrawer';
+import { DashboardLayoutOrchestrator } from './DashboardLayoutOrchestrator';
+import { DashboardSceneRenderer } from './DashboardSceneRenderer';
+import { DashboardSceneUrlSync } from './DashboardSceneUrlSync';
+import { LibraryPanelBehavior } from './LibraryPanelBehavior';
+import { UNCONFIGURED_PANEL_PLUGIN_ID } from './UnconfiguredPanel';
+import {
+  dashboardComposerEnabled,
+  dashboardModesEnabled,
+  getDashboardMode,
+  canManuallyEditDashboard,
+  isComposerEditing,
+  isComposerMode,
+  type DashboardMode,
+} from './dashboardModes';
+import { dashboardViews, dashboardViewChanged, type DashboardViewRequest } from './dashboardViewRegistry';
+import { setupKeyboardShortcuts } from './keyboardShortcuts';
+import { AutoGridItem } from './layout-auto-grid/AutoGridItem';
+import { AutoGridLayoutManager } from './layout-auto-grid/AutoGridLayoutManager';
+import { DashboardGridItem } from './layout-default/DashboardGridItem';
+import { DefaultGridLayoutManager } from './layout-default/DefaultGridLayoutManager';
+import { addNewRowTo } from './layouts-shared/addNew';
+import { clearClipboard } from './layouts-shared/paste';
+import { promotePanelAdHocChanges } from './panel-actions/promote/promotePanelAdHocChanges';
+import { PromotePanelAdHocChangesEvent } from './panel-actions/promote/utils';
+import { getUpdatedHoverHeader } from './panel-timerange/utils';
+import { takePendingPlanBuild } from './pendingPlanBuild';
+import { DashboardPlanningEvent } from './planningEvents';
+import { clearUnsavedDashboardConsent, copyDashboardConsent } from './sandbox-consent/sandboxConsent';
+import { type AnyDashboardLayoutManager, type DashboardLayoutManager } from './types/DashboardLayoutManager';
+import {
+  isFullDashboardEditing,
+  isDashboardReviewing,
+  type DashboardSceneLike,
+  type DashboardSceneState,
+} from './types/dashboard';
+
+export const PERSISTED_PROPS = ['title', 'description', 'tags', 'editable', 'graphTooltip', 'links', 'meta', 'preload'];
+const PANEL_SEARCH_VAR = 'systemPanelFilterVar';
+const PANELS_PER_ROW_VAR = 'systemDynamicRowSizeVar';
+
+type PanelStyles = {
+  fieldConfig?: { defaults: Partial<FieldConfig> };
+  options?: Record<string, unknown>;
+};
+
+type CopiedPanelStyles = {
+  panelType: string;
+  styles: PanelStyles;
+};
+
+function copyFieldConfigPropIfDefined<K extends keyof FieldConfig>(
+  source: FieldConfig,
+  target: Partial<FieldConfig>,
+  key: K
+): void {
+  const value = source[key];
+  if (value !== undefined) {
+    target[key] = value;
+  }
+}
+
+function extractOptionProps(source: Record<string, unknown>, props: readonly string[]): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (props.includes(key) && value !== undefined) {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
+export class DashboardScene extends SceneObjectBase<DashboardSceneState> implements DashboardSceneLike {
+  static Component = DashboardSceneRenderer;
+  public isDashboardScene = true;
+
+  /**
+   * Handles url sync
+   */
+  protected _urlSync = new DashboardSceneUrlSync(this);
+  /**
+   * Get notified when variables change
+   */
+  protected _variableDependency = new DashboardVariableDependency(this);
+
+  /**
+   * State before editing started
+   */
+  private _initialState?: DashboardSceneState;
+  /**
+   * Url state before editing started
+   */
+  private _initialUrlState?: H.Location;
+  /**
+   * Dashboard changes tracker
+   */
+  private _changeTracker: DashboardSceneChangeTracker;
+
+  private _sidebarActivation?: CancelActivationHandler;
+  private _assistantWrites = 0;
+  /** The open Composer session and the mode to return to when it ends. Set only while mode is `composer`. */
+  private _composer?: { session: ComposerSession; modeBefore: DashboardMode };
+  private _modePickerShown = false;
+  private _modePickerOpened = false;
+  private _editSession?: {
+    id: string;
+    source: 'user' | 'assistant';
+    startedAt: number;
+    manualChanges: boolean;
+    assistantChanges: boolean;
+    manualEdits: Map<string, number>;
+    aiEdits: Map<string, number>;
+  };
+
+  public trackModePickerShown() {
+    if (this._modePickerShown) {
+      return;
+    }
+    this._modePickerShown = true;
+    DashboardInteractions.modePickerShown({ dashboard_uid: this.state.uid, mode: getDashboardMode(this.state) });
+  }
+
+  public trackModePickerOpened() {
+    DashboardInteractions.modePickerOpened({
+      dashboard_uid: this.state.uid,
+      mode: getDashboardMode(this.state),
+      edit_session_id: this._editSession?.id,
+      first_open: !this._modePickerOpened,
+    });
+    this._modePickerOpened = true;
+  }
+
+  private startEditPeriod(source: 'user' | 'assistant') {
+    if (this._editSession) {
+      return;
+    }
+    this._editSession = {
+      id: generateUUID(),
+      source,
+      startedAt: performance.now(),
+      manualChanges: false,
+      assistantChanges: false,
+      manualEdits: new Map(),
+      aiEdits: new Map(),
+    };
+    DashboardInteractions.editPeriodStarted({
+      dashboard_uid: this.state.uid,
+      source,
+      edit_session_id: this._editSession.id,
+    });
+  }
+
+  public getEditSessionTracking(): Partial<DashboardEditSessionTracking> {
+    // Panel edits reach undo history on close, but can be saved or discarded while still open.
+    if (this.state.editPanel?.state.isDirty) {
+      this.recordEditMutation();
+    }
+    if (!this._editSession) {
+      return {};
+    }
+    const hadManualChanges = this._editSession.manualChanges || Boolean(this.state.editPanel?.state.isDirty);
+    const hadAssistantChanges = this._editSession.assistantChanges;
+    // Assistant writes are always recorded by the mutation client, so an actual change that neither
+    // actor recorded came from a manual edit path that doesn't report itself (e.g. legacy grid drags).
+    const hadUnattributedChanges =
+      !hadManualChanges && !hadAssistantChanges && Boolean(this.state.isDirty) && this.hasActualSaveChangesSafe();
+    const editCounts = (counts: Map<string, number>) =>
+      [...counts].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([action, count]) => ({ action, count }));
+    return {
+      edit_session_id: this._editSession.id,
+      edit_source: this._editSession.source,
+      mode: getDashboardMode(this.state),
+      had_manual_changes: hadManualChanges,
+      had_assistant_changes: hadAssistantChanges,
+      had_unattributed_changes: hadUnattributedChanges,
+      edit_actors: getEditActors(hadManualChanges || hadUnattributedChanges, hadAssistantChanges),
+      elapsed_ms: Math.round(performance.now() - this._editSession.startedAt),
+      manual_edits: editCounts(this._editSession.manualEdits),
+      ai_edits: editCounts(this._editSession.aiEdits),
+    };
+  }
+
+  // Tracking runs on exit and unload paths, which must not fail when the diff can't be computed.
+  private hasActualSaveChangesSafe() {
+    try {
+      return hasActualSaveChanges(this);
+    } catch {
+      return false;
+    }
+  }
+
+  public recordEditMutation(source: 'user' | 'assistant' = this._assistantWrites > 0 ? 'assistant' : 'user') {
+    if (!this.state.isEditing) {
+      return;
+    }
+    this.startEditPeriod(source);
+    if (this._editSession) {
+      const changesKey = source === 'assistant' ? 'assistantChanges' : 'manualChanges';
+      if (this._editSession[changesKey]) {
+        return;
+      }
+      this._editSession[changesKey] = true;
+      DashboardInteractions.editActorFirstChange({
+        edit_session_id: this._editSession.id,
+        actor: source,
+        mode: getDashboardMode(this.state),
+      });
+    }
+  }
+
+  public trackEditMutation(perform: () => void) {
+    const alreadyRecorded =
+      this._assistantWrites > 0 ? this._editSession?.assistantChanges : this._editSession?.manualChanges;
+    // Only compare until the first actual change by each actor in this editing period. Outside edit
+    // mode the comparison would be discarded, so skip the serialization.
+    if (alreadyRecorded || !this.state.isEditing) {
+      perform();
+      return;
+    }
+    const before = this.serializeForChangeTracking();
+    perform();
+    // Serialization fails while a batched action has elements detached; count the action as a change.
+    const after = before === null ? null : this.serializeForChangeTracking();
+    if (before === null || after === null || before !== after) {
+      this.recordEditMutation();
+    }
+  }
+
+  public recordEditAction(actionId: string) {
+    if (!this.state.isEditing) {
+      return;
+    }
+    this.startEditPeriod(this._assistantWrites > 0 ? 'assistant' : 'user');
+    if (this._editSession) {
+      const counts = this._assistantWrites > 0 ? this._editSession.aiEdits : this._editSession.manualEdits;
+      counts.set(actionId, (counts.get(actionId) ?? 0) + 1);
+    }
+  }
+
+  private serializeForChangeTracking(): string | null {
+    try {
+      return JSON.stringify(this.getSaveModel());
+    } catch {
+      return null;
+    }
+  }
+
+  private reportModeChange(previous: DashboardMode, trigger: DashboardModeTrigger) {
+    const mode = getDashboardMode(this.state);
+    if (dashboardModesEnabled() && previous !== mode && trigger !== 'restore') {
+      DashboardInteractions.modeChanged({
+        dashboard_uid: this.state.uid,
+        edit_session_id: this._editSession?.id,
+        previous_mode: previous,
+        mode,
+        trigger,
+        has_unsaved_changes: Boolean(this.state.isDirty),
+      });
+    }
+  }
+
+  private endEditPeriod(outcome: Exclude<DashboardEditPeriodOutcome, 'saved' | 'saved_as_copy'>) {
+    const tracking = this.getEditSessionTracking();
+    if (tracking.edit_session_id) {
+      DashboardInteractions.editPeriodEnded({
+        ...tracking,
+        edit_session_id: tracking.edit_session_id,
+        outcome,
+        has_unsaved_changes: Boolean(this.state.isDirty),
+      });
+    }
+    this._editSession = undefined;
+  }
+
+  /** Scope synchronous mutations only; asynchronous completion reports its actor explicitly. */
+  public withAssistantWrite<T>(write: () => T): T {
+    this._assistantWrites++;
+    try {
+      return write();
+    } finally {
+      this._assistantWrites--;
+    }
+  }
+
+  public prepareEditAction() {
+    // In Composer only Assistant writes; one over Viewing switches Composer to Editing first.
+    if (isComposerMode(this.state)) {
+      return this._assistantWrites > 0 && (isComposerEditing(this.state) || this.startComposerEditingForAssistant());
+    }
+    if (dashboardModesEnabled() && getDashboardMode(this.state) === 'agent' && this._assistantWrites === 0) {
+      return this.setDashboardMode('edit', 'manual_change');
+    }
+    return !dashboardModesEnabled() || getDashboardMode(this.state) !== 'view' || this._assistantWrites > 0;
+  }
+  private _sidebarBeforeViewing?: Pick<DashboardSidebarState, 'openPane' | 'selectionContext'>;
+  private _viewRequest?: AbortController;
+
+  /**
+   * Remember scroll position when going into panel edit
+   */
+  private _scrollRef?: ScrollRefElement;
+  private _prevScrollPos?: number;
+
+  /** Row slug path from the url that did not match any row yet (e.g. a repeated row not created yet) */
+  private _pendingRowScroll?: string;
+  private _pendingRowScrollSub?: Unsubscribable;
+  /**
+   * Not tied to activation: url sync runs before the scene activates, and StrictMode deactivates and
+   * re-activates it in development. Following stops by itself once the row leaves the page.
+   */
+  private _stopFollowingRow?: () => void;
+
+  /**
+   * What initiated the current edit session, e.g. the assistant building a dashboard for the user
+   */
+  private _editSessionSource?: 'user' | 'assistant';
+
+  /**
+   * Monotonic id so overlapping refreshPredefinedVariables() calls only apply the latest result.
+   * Also bumped on discard/restore so an in-flight refresh that snapped a discarded denylist
+   * cannot overwrite the restored variable set.
+   */
+  private _predefinedVariablesRefreshId = 0;
+
+  public serializer: DashboardSceneSerializerLike<
+    Dashboard | DashboardV2Spec,
+    DashboardMeta | DashboardWithAccessInfo<DashboardV2Spec>['metadata'],
+    Dashboard | DashboardV2Spec,
+    DashboardJson | DashboardV2Spec
+  >;
+
+  public constructor(state: Partial<DashboardSceneState>, serializerVersion: 'v1' | 'v2' = 'v1') {
+    super({
+      title: t('dashboard-scene.dashboard-scene.title.dashboard', 'Dashboard'),
+      meta: {},
+      editable: true,
+      $timeRange: state.$timeRange ?? new SceneTimeRange({}),
+      body:
+        state.body ?? state.preferences?.defaultLayoutTemplate?.clone() ?? DefaultGridLayoutManager.fromVizPanels([]),
+      links: state.links ?? [],
+      ...state,
+      sidebar: new DashboardSidebar(),
+      layoutOrchestrator: new DashboardLayoutOrchestrator(),
+      preferences: state.preferences ?? {},
+    });
+
+    this.serializer =
+      serializerVersion === 'v2' ? getDashboardSceneSerializer('v2') : getDashboardSceneSerializer('v1');
+
+    this._changeTracker = new DashboardSceneChangeTracker(this);
+
+    this.addActivationHandler(() => this._activationHandler());
+  }
+
+  private _activationHandler() {
+    this._modePickerShown = false;
+    this._modePickerOpened = false;
+    let prevSceneContext = window.__grafanaSceneContext;
+    const { pathname } = locationService.getLocation();
+    const isNew = pathname === '/dashboard/new';
+
+    window.__grafanaSceneContext = this;
+
+    this._initializePanelSearch();
+
+    if (this.state.isEditing) {
+      this._initialUrlState = locationService.getLocation();
+      this._changeTracker.startTrackingChanges();
+    }
+
+    if (isNewDashboard(this.state) && (isNew || pathname === DASHBOARD_LIBRARY_ROUTES.Template)) {
+      clearUnsavedDashboardConsent();
+    }
+
+    if (isNew) {
+      // New dashboards enter edit mode on activation, before any caller can tag the
+      // session, so the initiator is carried in the url (set by the assistant when it
+      // opens the editor to build a dashboard itself)
+      const editSource = locationService.getSearchObject().editSource;
+
+      // A plan preview opens /dashboard/new only so RENDER_PLAN can populate it, and never
+      // intends to edit -- entering edit mode here and exiting again a moment later would still
+      // show a real edit toolbar for the round trip in between. Skip the auto-edit entirely
+      // instead. This is a withhold-from-URL check (a missing/forged marker just degrades to
+      // the normal edit-mode behaviour below), unlike a grant-from-URL check such as ?editview=,
+      // which is why this is safe where that one was not.
+      if (editSource === 'plan-preview') {
+        // Opened to show a plan's building screen: start on it rather than the empty state.
+        const pendingBuild = takePendingPlanBuild();
+        if (pendingBuild) {
+          this.setState({ planning: { phase: 'building', ...pendingBuild } });
+        }
+      } else if (isMobileEditDeprecated()) {
+        // Building a new dashboard requires edit mode, which is unavailable on mobile.
+        redirectAwayFromMobileEdit();
+      } else {
+        // Silent CUJ signal so the dashboard_edit journey starts on /dashboard/new
+        // (the regular `dashboards_edit_button_clicked` doesn't fire here — auto-edit
+        // mode bypasses the button).
+        reportInteraction('dashboards_new_dashboard_init', {}, { silent: true });
+        this.onEnterEditMode(editSource === 'assistant' ? 'assistant' : 'user');
+        this.setState({ isDirty: true });
+      }
+    }
+
+    if (!this.state.meta.isEmbedded && this.state.uid) {
+      dashboardWatcher.watch(this.state.uid);
+    }
+
+    let clearKeyBindings = () => {};
+    const bindKeys = () => {
+      if (!config.publicDashboardAccessToken) {
+        clearKeyBindings = setupKeyboardShortcuts(this);
+      }
+    };
+    bindKeys();
+    const oldDashboardWrapper = new DashboardModelCompatibilityWrapper(this);
+
+    // @ts-expect-error
+    getDashboardSrv().setCurrent(oldDashboardWrapper);
+
+    const destroyMutationClient = createMutationClient(this, 'dashboard');
+    const presentationSubscription = this.subscribeToState((state, previousState) => {
+      if (
+        isDashboardReviewing(state) &&
+        (state.body !== previousState.body || state.sidebar !== previousState.sidebar)
+      ) {
+        this.applyDashboardMode();
+      }
+    });
+    // Composer owns the keyboard while active: no dashboard shortcut can edit around it. Leaving the
+    // mode by any path (exit, discard, a manual-edit entry point) closes the session.
+    const composerSubscription = this.subscribeToState((state, previousState) => {
+      const active = isComposerMode(state);
+      if (active === isComposerMode(previousState)) {
+        return;
+      }
+      if (active) {
+        clearKeyBindings();
+        clearKeyBindings = () => {};
+        return;
+      }
+      bindKeys();
+      this.closeComposerSession();
+    });
+
+    // Panel actions ask for their ad hoc changes to be saved with an event, so they do not import the dashboard's saving code.
+    const promoteAdHocChangesSubscription = this.subscribeToEvent(
+      PromotePanelAdHocChangesEvent,
+      ({ payload: { panel } }) => promotePanelAdHocChanges(this, panel)
+    );
+
+    // Closing the tab or reloading never deactivates the scene, so an open edit period would go unreported.
+    const onPageHide = () => this.endEditPeriod('abandoned');
+    window.addEventListener('pagehide', onPageHide);
+
+    return () => {
+      // Leaving the dashboard ends Composer, and drops a request to enter it that Assistant has not taken
+      // yet; the cached scene must not come back in it.
+      clearPendingComposerEnterRequest();
+      this.exitComposerMode();
+      this.closeComposerSession();
+      composerSubscription.unsubscribe();
+      promoteAdHocChangesSubscription.unsubscribe();
+      window.removeEventListener('pagehide', onPageHide);
+      this.endEditPeriod('abandoned');
+      this.cancelPendingViews();
+      // A plan preview that's still showing when the scene deactivates (navigated away, tab
+      // closed) never got a Build or Dismiss decision — report that honestly as 'closed' rather
+      // than leaving the caller holding a stale reference to a preview nothing is showing.
+      if (this.state.planning) {
+        appEvents.publish(new DashboardPlanningEvent({ planId: this.state.planning.planId, action: 'closed' }));
+        // Lifecycle hygiene, not a cache fix: a fresh /dashboard/new always builds an uncached
+        // scene with no planning state, so this only matters if that ever changes.
+        this.setState({ planning: undefined });
+      }
+      presentationSubscription.unsubscribe();
+      destroyMutationClient();
+      window.__grafanaSceneContext = prevSceneContext;
+      clearKeyBindings();
+      this._changeTracker.terminate();
+      this.deactivateSidebar();
+      oldDashboardWrapper.destroy();
+      dashboardWatcher.leave();
+      this._pendingRowScrollSub?.unsubscribe();
+      this._pendingRowScrollSub = undefined;
+      this._pendingRowScroll = undefined;
+    };
+  }
+
+  private _initializePanelSearch() {
+    const systemPanelFilter = sceneGraph.lookupVariable(PANEL_SEARCH_VAR, this)?.getValue();
+    if (typeof systemPanelFilter === 'string') {
+      this.setState({ panelSearch: systemPanelFilter });
+    }
+
+    const panelsPerRow = sceneGraph.lookupVariable(PANELS_PER_ROW_VAR, this)?.getValue();
+    if (typeof panelsPerRow === 'string') {
+      const perRow = Number.parseInt(panelsPerRow, 10);
+      this.setState({ panelsPerRow: Number.isInteger(perRow) ? perRow : undefined });
+    }
+  }
+
+  public setDefaultVariables(defaultVariables: VariableKind[]) {
+    const variableSet = sceneGraph.getVariables(this);
+    // Only replace datasource-provided defaults. Variables with other origins (e.g.
+    // predefined global/folder variables) are injected elsewhere and must survive.
+    const keptVars = variableSet.state.variables.filter((v) => v.state.origin?.type !== 'datasource');
+    const keptNames = new Set(keptVars.map((v) => v.state.name));
+    const defaultVarObjects = createSceneVariablesFromVariableKinds(defaultVariables, { migrateUrlState: false })
+      // Nearest scope wins: existing variables shadow incoming defaults of the same name.
+      .filter((v) => !keptNames.has(v.state.name));
+
+    variableSet.setState({ variables: [...defaultVarObjects, ...keptVars] });
+  }
+
+  /**
+   * Replaces predefined (global/folder) variables on a live/cached scene.
+   * Used when the scene cache is reused but predefined variables were re-fetched —
+   * the scene cache has no TTL, while the predefined-variables cache is only 30s.
+   */
+  public setPredefinedVariables(predefinedVariables: VariableKind[]) {
+    const variableSet = sceneGraph.getVariables(this);
+    const previousByName = new Map(
+      variableSet.state.variables.filter((v) => isPredefinedOrigin(v.state.origin)).map((v) => [v.state.name, v])
+    );
+    const keptVars = variableSet.state.variables.filter((v) => !isPredefinedOrigin(v.state.origin));
+    const keptNames = new Set(keptVars.map((v) => v.state.name));
+    const predefinedVarObjects = createSceneVariablesFromVariableKinds(predefinedVariables, { migrateUrlState: false })
+      // Nearest scope wins: dashboard-local / datasource defaults shadow predefined names.
+      .filter((v) => !keptNames.has(v.state.name))
+      .map((v) => {
+        const previous = previousByName.get(v.state.name);
+        // Preserve the user's current selection when refreshing definitions on a cached scene.
+        if (previous instanceof MultiValueVariable && v instanceof MultiValueVariable) {
+          v.setState({
+            value: previous.state.value,
+            text: previous.state.text,
+          });
+        }
+        return v;
+      });
+
+    variableSet.setState({ variables: [...predefinedVarObjects, ...keptVars] });
+  }
+
+  /**
+   * Re-resolve global/folder variables from the current selection annotation and apply them
+   * to the live scene (e.g. after save) so a full page reload is not required.
+   */
+  public async refreshPredefinedVariables(): Promise<void> {
+    if (!getFeatureFlagClient().getBooleanValue(FlagKeys.GrafanaDashboardGlobalVariables, false)) {
+      return;
+    }
+
+    const refreshId = ++this._predefinedVariablesRefreshId;
+    const folderUid = this.state.meta.folderUid;
+    const annotations: Record<string, string | undefined> = {};
+    for (const [key, value] of Object.entries(this.state.meta.k8s?.annotations ?? {})) {
+      if (typeof value === 'string') {
+        annotations[key] = value;
+      }
+    }
+    const localVariableNames = sceneGraph
+      .getVariables(this)
+      .state.variables.filter((v) => !isPredefinedOrigin(v.state.origin))
+      .map((v) => v.state.name);
+    const resolutionInput = { annotations, localVariableNames };
+
+    if (!mayInjectAnyPredefinedVariables(resolutionInput)) {
+      if (refreshId !== this._predefinedVariablesRefreshId) {
+        return;
+      }
+      this.setPredefinedVariables([]);
+      return;
+    }
+
+    const candidates = await fetchPredefinedVariables(folderUid);
+    // A newer radio/save refresh may have started while this fetch was in flight.
+    if (refreshId !== this._predefinedVariablesRefreshId) {
+      return;
+    }
+    // Keep the currently injected set when the fetch fails — do not treat failure as "none".
+    if (candidates === null) {
+      return;
+    }
+    this.setPredefinedVariables(resolvePredefinedVariablesForDashboard(candidates, resolutionInput));
+  }
+
+  /** Persist the cross-dashboard variable selection annotation and re-inject. */
+  public setUseCrossDashboardVariables(selection: UseCrossDashboardVariables): Promise<void> {
+    return persistUseCrossDashboardVariables(this, selection);
+  }
+
+  public setDefaultLinks(defaultLinks: DashboardLink[]) {
+    const userLinks = this.state.links.filter((l) => !l.origin);
+    this.setState({ links: [...defaultLinks, ...userLinks] });
+  }
+
+  public clearDefaultControls() {
+    const variableSet = sceneGraph.getVariables(this);
+    // Predefined (global/folder) variables are not datasource defaults — keep them.
+    const keptVars = variableSet.state.variables.filter((v) => v.state.origin?.type !== 'datasource');
+    variableSet.setState({ variables: keptVars });
+
+    const nonDefaultLinks = this.state.links.filter((l) => !l.origin);
+    this.setState({ links: nonDefaultLinks });
+  }
+
+  /** Returns false if starting an edit session was blocked, e.g. on mobile. A session already underway is never blocked. */
+  public onEnterEditMode = (
+    source: 'user' | 'assistant' = 'user',
+    trigger: DashboardModeTrigger = source === 'assistant' ? 'assistant' : 'navigation'
+  ): boolean => {
+    if (!this.state.isEditing && isMobileEditDeprecated()) {
+      notifyMobileEditNotAvailable();
+      return false;
+    }
+
+    const currentMode = getDashboardMode(this.state);
+    if (trigger !== 'restore') {
+      this.startEditPeriod(source);
+    }
+    let mode = this.state.mode ?? 'edit';
+    if (source === 'assistant' && currentMode === 'view') {
+      mode = 'agent';
+    } else if (source === 'user' && currentMode === 'agent') {
+      mode = 'edit';
+    }
+    if (!this.state.isEditing) {
+      this._editSessionSource = source;
+      this._sidebarBeforeViewing = undefined;
+
+      this.state.sidebar.clearHistory();
+      const preview = getScenePendingChangePreview(this.state);
+      if (preview && getPendingChangesHistory(this.state)) {
+        startRecordingPendingChanges(this, preview.pending.history?.getState().proposed ?? preview.pending.proposed);
+      }
+
+      // Capture the discard baseline only once per edit session. A plan's building screen is
+      // transient: the build's first write enters edit mode while it is still up, and discarding
+      // must not bring it back with nothing left to end it.
+      this._initialState = sceneUtils.cloneSceneObjectState(this.state, { isDirty: false, planning: undefined });
+      this._initialUrlState = locationService.getLocation();
+
+      this.setState({
+        isEditing: true,
+        editable: true,
+        ...(dashboardModesEnabled() ? { mode } : {}),
+      });
+      this.state.body.editModeChanged?.(true);
+      this._changeTracker.startTrackingChanges();
+
+      DashboardInteractions.editSessionStarted({ dashboard_uid: this.state.uid, source });
+    }
+
+    if (dashboardModesEnabled()) {
+      this.setState({ mode });
+      this.applyDashboardMode();
+      this.reportModeChange(currentMode, trigger);
+    }
+    return true;
+  };
+
+  /**
+   * Returns false if the switch was refused. On mobile, switching into a non-view mode is blocked with
+   * a warning, but staying in the current mode is not.
+   */
+  public setDashboardMode(mode: DashboardMode, trigger: DashboardModeTrigger = 'navigation'): boolean {
+    // Only a Composer session enters Composer (see enterComposerMode); any other mode request leaves it.
+    if (mode === 'composer' && trigger !== 'composer') {
+      return false;
+    }
+    if (mode !== 'composer' && isComposerMode(this.state)) {
+      this.exitComposerMode();
+      if (getDashboardMode(this.state) === mode) {
+        return true;
+      }
+    }
+    if (
+      !dashboardModesEnabled() ||
+      !this.canEditDashboard() ||
+      this.state.planning ||
+      this.state.editPanel ||
+      this.state.editview ||
+      (this.state.viewPanel && mode !== 'edit') ||
+      this.state.layoutOrchestrator.isDragging()
+    ) {
+      return false;
+    }
+    if (mode === 'view' && isNewDashboard(this.state)) {
+      if (trigger === 'picker') {
+        this.openSaveDrawer({ onSaveSuccess: () => this.setDashboardMode('view', trigger) });
+      }
+      return false;
+    }
+    if (mode !== 'view' && !this.state.editable) {
+      return false;
+    }
+    const previous = getDashboardMode(this.state);
+    if (previous === mode) {
+      return true;
+    }
+    // A switch into any other non-view mode is blocked
+    if (mode !== 'view' && isMobileEditDeprecated()) {
+      notifyMobileEditNotAvailable();
+      return false;
+    }
+    if (
+      trigger === 'picker' &&
+      previous !== 'view' &&
+      mode === 'view' &&
+      this.state.isDirty &&
+      hasActualSaveChanges(this)
+    ) {
+      this.showUnsavedChangesDialog(
+        () => this.setDashboardMode('view', trigger),
+        () => {
+          this.discardChangesAndKeepEditing();
+          this.setDashboardMode('view', trigger);
+        }
+      );
+      return false;
+    }
+    // Composer is entered by Assistant, so its edit session and period are Assistant's. Over Viewing it
+    // has none.
+    const source = trigger === 'assistant' || trigger === 'composer' ? 'assistant' : 'user';
+    const startsEditing = mode !== 'view' && (mode !== 'composer' || this.state.composerEditing === true);
+    if (!this.state.isEditing && startsEditing) {
+      this.onEnterEditMode(source, 'restore');
+    }
+    if (trigger !== 'restore' && startsEditing) {
+      this.startEditPeriod(source);
+    }
+    if (previous === 'edit') {
+      this._sidebarBeforeViewing = {
+        openPane: this.state.sidebar.state.openPane,
+        selectionContext: this.state.sidebar.state.selectionContext,
+      };
+    }
+    this.state.sidebar.closePane();
+    this.setState({ mode });
+    this.applyDashboardMode();
+    if (mode === 'edit') {
+      this.restoreSidebarAfterViewing();
+    }
+    this.reportModeChange(previous, trigger);
+    return true;
+  }
+
+  private restoreSidebarAfterViewing() {
+    const saved = this._sidebarBeforeViewing;
+    this._sidebarBeforeViewing = undefined;
+    if (!saved?.openPane) {
+      return;
+    }
+
+    const sidebar = this.state.sidebar;
+    // Assistant mutations may have removed or replaced selected items while Viewing was active.
+    const selected = saved.selectionContext.selected.filter(({ id }) => sidebar.getSelectedObject(id));
+    if (saved.openPane.getId() === 'element' && selected.length === 0) {
+      return;
+    }
+
+    sidebar.setState({ selectionContext: { ...sidebar.state.selectionContext, selected } });
+    // A spec replacement may have replaced the sidebar too; attach a pane belonging to this tree.
+    sidebar.openPane(saved.openPane.clone());
+  }
+
+  public openFullEditor() {
+    // A manual-edit entry point (edit panel URL, settings) leaves Composer first.
+    this.exitComposerMode();
+    if (!this.state.isEditing) {
+      this.onEnterEditMode();
+    }
+    if (dashboardModesEnabled()) {
+      this.setDashboardMode('edit');
+    } else {
+      this.applyDashboardMode();
+    }
+  }
+
+  /**
+   * Enters Composer for `session`, over the mode it is entered from; every manual edit surface is hidden.
+   * From Editing it writes inside the edit session, as unsaved changes with native undo. From Viewing it
+   * starts no edit session until the user (`setComposerEditing`) or an Assistant edit switches it to Editing.
+   */
+  public enterComposerMode(session: ComposerSession): boolean {
+    if (this._composer || !dashboardComposerEnabled()) {
+      return false;
+    }
+    const modeBefore = getDashboardMode(this.state);
+    this.setState({ composerEditing: modeBefore === 'edit' });
+    if (!this.setDashboardMode('composer', 'composer')) {
+      this.setState({ composerEditing: undefined });
+      return false;
+    }
+    this._composer = { session, modeBefore };
+    return true;
+  }
+
+  /** Leaves Composer for the mode it is over: Editing, or what it was entered from. Never saves or discards. */
+  public exitComposerMode() {
+    if (!isComposerMode(this.state)) {
+      return;
+    }
+    const modeBefore = this._composer?.modeBefore;
+    const mode: DashboardMode = isComposerEditing(this.state) ? 'edit' : modeBefore === 'agent' ? 'agent' : 'view';
+    // An Assistant edit and its undo leave the dashboard dirty though it matches the saved version.
+    this.clearDirtyIfUnchanged();
+    this.setState({ mode, composerEditing: undefined });
+    this.applyDashboardMode();
+    if (mode === 'edit') {
+      this.restoreSidebarAfterViewing();
+    }
+    this.reportModeChange('composer', 'composer');
+  }
+
+  /** Whether the open Composer session may write: only over Editing. */
+  public canComposerWrite(): boolean {
+    return isComposerEditing(this.state);
+  }
+
+  /**
+   * Switches Composer between Viewing and Editing (the mode picker inside Composer); Composer stays on.
+   * Editing starts the edit session. Viewing stops Composer's writes: while Assistant runs a turn it asks
+   * first, since that stops the turn; then it asks to save or discard unsaved changes.
+   */
+  public setComposerEditing(editing: boolean) {
+    if (!isComposerMode(this.state) || isComposerEditing(this.state) === editing) {
+      return;
+    }
+    if (editing) {
+      if (!this.state.editable || !this.canEditDashboard()) {
+        return;
+      }
+      if (this.state.isEditing) {
+        this.startEditPeriod('user');
+      } else if (!this.onEnterEditMode('user', 'picker')) {
+        return;
+      }
+      this.setState({ composerEditing: true });
+      return;
+    }
+    if (this.getComposerSession()?.assistantWorking) {
+      appEvents.publish(
+        new ShowConfirmModalEvent({
+          title: t('dashboard-scene.dashboard-scene.modal.title.composer-stop-editing', 'Switch to Viewing?'),
+          text: t(
+            'dashboard-scene.dashboard-scene.modal.text.composer-stop-editing',
+            'Assistant is still making changes to this dashboard. Switching to Viewing stops it. Changes it has already made stay.'
+          ),
+          yesText: t('dashboard-scene.dashboard-scene.modal.stop-and-switch', 'Stop and switch'),
+          noText: t('dashboard-scene.dashboard-scene.modal.keep-working', 'Keep working'),
+          onConfirm: () => {
+            // Assistant stops its turn once Composer can no longer write, before any save prompt.
+            this.setState({ composerEditing: false });
+            // The confirm modal hides itself after onConfirm returns, which would also close the save
+            // prompt, so continue once it has closed.
+            queueMicrotask(() => this.offerToSaveComposerEdits(() => {}));
+          },
+        })
+      );
+      return;
+    }
+    this.offerToSaveComposerEdits(() => this.setState({ composerEditing: false }));
+  }
+
+  /**
+   * An Assistant edit while Composer is over Viewing switches it to Editing, with an Assistant edit session,
+   * as an Assistant edit from Viewing starts Agent editing without Composer. False when the user cannot edit
+   * or entering edit mode was blocked.
+   */
+  public startComposerEditingForAssistant(): boolean {
+    if (!isComposerMode(this.state) || !this.state.editable || !this.canEditDashboard()) {
+      return false;
+    }
+    if (!isComposerEditing(this.state)) {
+      if (this.state.isEditing) {
+        this.startEditPeriod('assistant');
+      } else if (!this.onEnterEditMode('assistant', 'assistant')) {
+        return false;
+      }
+      this.setState({ composerEditing: true });
+    }
+    return true;
+  }
+
+  /** Asks to save or discard unsaved changes, then runs `done`; Cancel skips it. */
+  private offerToSaveComposerEdits(done: () => void) {
+    this.clearDirtyIfUnchanged();
+    if (!this.state.isDirty || this.managedResourceCannotBeEdited()) {
+      done();
+      return;
+    }
+    this.showUnsavedChangesDialog(done, () => {
+      this.discardChangesAndKeepEditing();
+      done();
+    });
+  }
+
+  /** Drops the dirty flag when the dashboard has no changes to save, by the comparison Save uses. */
+  public clearDirtyIfUnchanged() {
+    if (this.state.isDirty && !hasActualSaveChanges(this)) {
+      this.setState({ isDirty: false });
+    }
+  }
+
+  /**
+   * Turns Composer off (its toolbar button), back to the mode it is over. Ending the session stops a running
+   * turn, so while one runs it asks first: Keep working stays in Composer. Never saves or discards.
+   */
+  public leaveComposer() {
+    if (!this.getComposerSession()?.assistantWorking) {
+      this.exitComposerMode();
+      return;
+    }
+    appEvents.publish(
+      new ShowConfirmModalEvent({
+        title: t('dashboard-scene.dashboard-scene.modal.title.leave-composer', 'Leave Composer?'),
+        text: t(
+          'dashboard-scene.dashboard-scene.modal.text.leave-composer',
+          'Assistant is still making changes to this dashboard. Leaving Composer stops it. Changes it has already made stay.'
+        ),
+        yesText: t('dashboard-scene.dashboard-scene.modal.stop-and-leave', 'Stop and leave'),
+        noText: t('dashboard-scene.dashboard-scene.modal.keep-working', 'Keep working'),
+        onConfirm: () => this.exitComposerMode(),
+      })
+    );
+  }
+
+  public getComposerSession(): ComposerSession | undefined {
+    return isComposerMode(this.state) ? this._composer?.session : undefined;
+  }
+
+  private closeComposerSession() {
+    const composer = this._composer;
+    this._composer = undefined;
+    composer?.session.close();
+  }
+
+  public applyDashboardMode() {
+    const fullEditing = isFullDashboardEditing(this.state);
+    this.state.body.editModeChanged?.(fullEditing);
+    if (this.state.isEditing) {
+      this.activateSidebar();
+    }
+    if (fullEditing) {
+      this.state.sidebar.enableSelection();
+    } else {
+      this.state.sidebar.disableSelection();
+    }
+  }
+
+  public openChanges() {
+    reportInteraction('dashboards_changes_opened', { mode: getDashboardMode(this.state) });
+    return this.openSaveDrawer({ showDiff: true });
+  }
+
+  public getEditSessionSource() {
+    return this._editSessionSource;
+  }
+
+  /**
+   * Activate the sidebar if it is not already active (e.g. not rendered), so programmatic
+   * mutations that dispatch DashboardEditActionEvents get performed. The activation is
+   * reference-counted, so we retain the handler and release it on exit (see deactivateSidebar).
+   */
+  public activateSidebar() {
+    const { sidebar } = this.state;
+    if (sidebar.isActive) {
+      return;
+    }
+    // Release the previous pane's activation before acquiring a new one.
+    this.deactivateSidebar();
+    this._sidebarActivation = sidebar.activate();
+  }
+
+  private deactivateSidebar() {
+    this._sidebarActivation?.();
+    this._sidebarActivation = undefined;
+  }
+
+  private getSaveAsFields(
+    saveModel: Dashboard | DashboardV2Spec,
+    source: Pick<DashboardSceneState, 'title' | 'description' | 'tags'>
+  ) {
+    const current = this.state;
+    const savedFields = {
+      title: saveModel.title ?? current.title,
+      description: saveModel.description,
+      tags: saveModel.tags ?? [],
+    };
+
+    const fieldsAfterSave: typeof source = { ...savedFields };
+
+    // Preserve fields edited after the save request started.
+    if (current.title !== source.title) {
+      fieldsAfterSave.title = current.title;
+    }
+
+    if (current.description !== source.description) {
+      fieldsAfterSave.description = current.description;
+    }
+
+    if (!isEqual(current.tags, source.tags)) {
+      fieldsAfterSave.tags = current.tags;
+    }
+
+    return { savedFields, fieldsAfterSave };
+  }
+
+  public async saveCompleted(
+    saveModel: Dashboard | DashboardV2Spec,
+    result: SaveDashboardResponseDTO,
+    folderUid?: string,
+    saveAsSource?: Pick<DashboardSceneState, 'title' | 'description' | 'tags'>
+  ) {
+    this._editSession = undefined;
+    this.serializer.onSaveComplete(sortedDeepCloneWithoutNulls(saveModel), result);
+
+    const wasTrackingChanges = this._changeTracker.isTrackingChanges;
+    this._changeTracker.stopTrackingChanges({ discardPendingChecks: true });
+
+    // Save As / first save mint a new uid; skip the refresh await below so redirect isn't delayed.
+    const isNewResource = result.uid !== this.state.uid;
+
+    if (!this.state.uid && result.uid) {
+      copyDashboardConsent('', result.uid);
+    }
+
+    const saveAsFields = saveAsSource ? this.getSaveAsFields(saveModel, saveAsSource) : undefined;
+    this.setState({
+      ...saveAsFields?.fieldsAfterSave,
+      version: result.version,
+      isDirty: false,
+      uid: result.uid,
+      meta: {
+        ...this.state.meta,
+        uid: result.uid,
+        url: result.url,
+        slug: result.slug,
+        folderUid: folderUid,
+        version: result.version,
+      },
+    });
+
+    this.state.editPanel?.dashboardSaved();
+
+    // Re-apply denylist before re-baselining on in-place saves. Skip awaiting on Save As —
+    // we're about to navigate away.
+    if (!isNewResource) {
+      await this.refreshPredefinedVariables();
+    }
+
+    this._initialState = sceneUtils.cloneSceneObjectState(this.state, {
+      ...saveAsFields?.savedFields,
+      isDirty: false,
+      overlay: undefined,
+    });
+    this._initialUrlState = locationService.getLocation();
+    // Detect edits made during the save before its redirect can leave the dashboard.
+    this.setState({ isDirty: hasActualSaveChanges(this), overlay: undefined });
+
+    if (wasTrackingChanges) {
+      this._changeTracker.startTrackingChanges();
+    }
+    this.publishEvent(new DashboardStateChangedEvent({ source: this }), true);
+  }
+
+  public exitEditMode({ skipConfirm, restoreInitialState }: { skipConfirm: boolean; restoreInitialState?: boolean }) {
+    if (!this.canDiscard()) {
+      console.error('Trying to discard back to a state that does not exist, initialState undefined');
+      return;
+    }
+
+    // Edits that skipped the edit actions, which record each change, are recorded as one here, and
+    // an edit the plugin failed to record is retried. Before exiting: that discards an open panel editor.
+    const history = getPendingChangesHistory(this.state);
+    if (history && !restoreInitialState) {
+      if ((this.state.isDirty && hasActualSaveChanges(this)) || hasUnrecordedPendingChange(this)) {
+        void recordPendingChange(this, history, t('dashboard-scene.lifecycle.edited-dashboard', 'Edit dashboard'));
+      }
+      this.exitEditModeConfirmed(false);
+      return;
+    }
+
+    if (!this.state.isDirty || skipConfirm || !hasActualSaveChanges(this) || this.managedResourceCannotBeEdited()) {
+      this.exitEditModeConfirmed(restoreInitialState || this.state.isDirty);
+      return;
+    }
+
+    if (isDashboardNewLayoutsEnabled()) {
+      this.showUnsavedChangesDialog(
+        () => this.exitEditModeConfirmed(false),
+        () => this.exitEditModeConfirmed()
+      );
+    } else {
+      appEvents.publish(
+        new ShowConfirmModalEvent({
+          title: t(
+            'dashboard-scene.dashboard-scene.title.discard-changes-to-dashboard',
+            'Discard changes to dashboard?'
+          ),
+          text: t(
+            'dashboard-scene.dashboard-scene.title.unsaved-changes-question',
+            'You have unsaved changes to this dashboard. Are you sure you want to discard them?'
+          ),
+          yesText: t('dashboard-scene.dashboard-scene.modal.discard', 'Discard'),
+          onConfirm: () => {
+            this.exitEditModeConfirmed();
+          },
+        })
+      );
+    }
+  }
+
+  private showUnsavedChangesDialog(onSaveSuccess: () => void, onDiscard: () => void) {
+    const canSave = Boolean(this.state.meta.canSave);
+
+    appEvents.publish(
+      new ShowConfirmModalEvent({
+        title: t('dashboard-scene.dashboard-scene.modal.title.unsaved-changes', 'Unsaved changes'),
+        text: t(
+          'dashboard-scene.dashboard-scene.modal.text.save-changes-question',
+          'Do you want to save your changes?'
+        ),
+        altActionText: canSave ? t('dashboard-scene.dashboard-scene.modal.save', 'Save') : undefined,
+        noText: t('dashboard-scene.dashboard-scene.modal.cancel', 'Cancel'),
+        yesText: t('dashboard-scene.dashboard-scene.modal.discard', 'Discard'),
+        yesButtonVariant: 'destructive',
+        onAltAction: canSave
+          ? () => {
+              this.openSaveDrawer({
+                onSaveSuccess,
+              });
+            }
+          : undefined,
+        onConfirm: onDiscard,
+      })
+    );
+  }
+
+  private exitEditModeConfirmed(restoreInitialState = true) {
+    this.endEditPeriod(restoreInitialState ? 'discarded' : 'exited');
+    this._sidebarBeforeViewing = undefined;
+    // No need to listen to changes anymore
+    this._changeTracker.stopTrackingChanges({ discardPendingChecks: true });
+
+    // CUJ-only signal: ends dashboard_edit journey when the user actually leaves
+    // edit mode, regardless of whether changes were discarded or there were
+    // none to begin with. dashboardEditDiscarded only fires on the dirty path,
+    // so we'd otherwise lose the no-op exit case.
+    reportInteraction('dashboards_edit_exited', { restoreInitialState }, { silent: true });
+    // Release any sidebar we activated programmatically before the pane is swapped/unmounted.
+    this.deactivateSidebar();
+
+    // We are updating url and removing editview and editPanel.
+    // The initial url may be including edit view, edit panel or inspect query params if the user pasted the url,
+    // hence we need to cleanup those query params to get back to the dashboard view. Otherwise url sync can trigger overlays.
+    const url = locationUtil.getUrlForPartial(this._initialUrlState!, {
+      editPanel: null,
+      editview: null,
+      inspect: null,
+      inspectTab: null,
+      shareView: null,
+    });
+
+    if (!this.state.meta.isEmbedded) {
+      locationService.replace(locationUtil.stripBaseFromUrl(url));
+    }
+
+    if (restoreInitialState) {
+      // Restore initial state and disable editing
+      const { loadingView, ...initialState } = this._initialState ?? {};
+      this.setState({ ...initialState, isEditing: false, mode: undefined, composerEditing: undefined });
+      this.restoreSerializerAnnotationsFromInitialState();
+      appEvents.publish(new DashboardDiscardedEvent());
+      DashboardInteractions.dashboardEditDiscarded();
+    } else {
+      // Do not restore
+      this.setState({ isEditing: false, mode: undefined, composerEditing: undefined });
+    }
+
+    // if we are in edit panel, we need to onDiscard()
+    // so the useEffect cleanup comes later and
+    // doesn't try to commit the changes
+    if (this.state.editPanel) {
+      this.state.editPanel.onDiscard();
+    }
+
+    // Disable grid dragging
+    this.state.body.editModeChanged?.(false);
+  }
+
+  /** Whether edits are recorded in the history of pending changes to a saved dashboard, with no Save. */
+  public recordsToPendingChanges(): boolean {
+    const preview = getScenePendingChangePreview(this.state);
+    return Boolean(getPendingChangesHistory(this.state) && preview && !proposesNewDashboard(preview.pending));
+  }
+
+  /**
+   * The scene as recorded in the pending changes it previews (see pendingChangesHistory.ts): later
+   * edits count as changes from there.
+   */
+  public markPendingChangesRecorded(saveModel: DashboardV2Spec) {
+    if (this.serializer instanceof V2DashboardSerializer) {
+      this.serializer.initialSaveModel = sortedDeepCloneWithoutNulls(saveModel);
+    }
+    this.setState({ isDirty: false });
+  }
+
+  public canDiscard() {
+    return this._initialState !== undefined;
+  }
+
+  /**
+   * After the dashboard was reloaded into this scene in place, mid edit session: discarding goes back
+   * to what was reloaded, as it would after a fresh load in edit mode, not to the tree it replaced.
+   */
+  public rebaselineEditSession() {
+    if (!this.state.isEditing) {
+      return;
+    }
+    this._initialState = sceneUtils.cloneSceneObjectState(this.state, { isDirty: false, planning: undefined });
+    this._initialUrlState = locationService.getLocation();
+  }
+
+  /**
+   * Discard changes and revert to the last saved state, while keeping edit mode enabled.
+   * This is useful for flows where you want to continue an action (for example share/export)
+   * without forcing the user to exit edit mode.
+   */
+  public discardChangesAndKeepEditing() {
+    if (!this.canDiscard()) {
+      console.error('Trying to discard back to a state that does not exist, initialState undefined');
+      return;
+    }
+
+    this.endEditPeriod('discarded');
+
+    // Stop tracking while we reset state.
+    this._changeTracker.stopTrackingChanges({ discardPendingChecks: true });
+
+    // The restored state swaps in a cloned sidebar, so release the one we activated programmatically.
+    const hadProgrammaticSidebar = this._sidebarActivation !== undefined;
+    this.deactivateSidebar();
+
+    const { mode } = this.state;
+    const { loadingView, ...restoredState } = sceneUtils.cloneSceneObjectState(this._initialState!, {
+      isDirty: false,
+    });
+
+    // Ensure the restored layout stays editable.
+    restoredState.body.editModeChanged?.(isFullDashboardEditing(this.state));
+
+    this.setState({
+      ...restoredState,
+      mode,
+      // The baseline was taken when editing started; Composer's Viewing/Editing is now's, not then's.
+      composerEditing: this.state.composerEditing,
+      isEditing: true,
+      editable: true,
+      isDirty: false,
+      editPanel: undefined,
+      editview: undefined,
+      overlay: undefined,
+    });
+
+    this.applyDashboardMode();
+
+    // We stay in edit mode, so re-activate the swapped-in pane to keep programmatic mutations working.
+    if (hadProgrammaticSidebar) {
+      this.activateSidebar();
+    }
+
+    this.restoreSerializerAnnotationsFromInitialState();
+    this._changeTracker.startTrackingChanges();
+  }
+
+  /**
+   * Serializer annotations are mutated outside scene state when editing the selection.
+   * Restore them from the edit-session baseline when discarding.
+   */
+  private restoreSerializerAnnotationsFromInitialState() {
+    // Drop any in-flight refresh that captured the discarded denylist.
+    this._predefinedVariablesRefreshId++;
+
+    const k8s = this.serializer.getK8SMetadata();
+    if (!k8s) {
+      return;
+    }
+    const annotations: Record<string, string> = {};
+    for (const [key, value] of Object.entries(k8s.annotations ?? {})) {
+      if (typeof value === 'string') {
+        annotations[key] = value;
+      }
+    }
+    const initialValue = this._initialState?.meta.k8s?.annotations?.[AnnoKeyUseCrossDashboardVariables];
+    if (typeof initialValue === 'string') {
+      annotations[AnnoKeyUseCrossDashboardVariables] = initialValue;
+    } else {
+      delete annotations[AnnoKeyUseCrossDashboardVariables];
+    }
+    this.serializer.setK8SAnnotations(annotations);
+  }
+
+  public pauseTrackingChanges() {
+    this._changeTracker.stopTrackingChanges({ discardPendingChecks: true });
+  }
+
+  public resumeTrackingChanges() {
+    this._changeTracker.startTrackingChanges({ checkForChanges: true });
+  }
+
+  public onRestore = async (version: DecoratedRevisionModel): Promise<boolean> => {
+    if (this.state.meta.isDashboardTemplate) {
+      return getDashboardTemplateExtension().restore(this, version);
+    }
+
+    const api = await getDashboardAPI();
+    // the id here is the resource version in k8s, use this instead to get the specific version
+    const versionRsp = await api.restoreDashboardVersion(version.uid, version.id);
+
+    if (!Number.isInteger(versionRsp.version)) {
+      return false;
+    }
+
+    let dashScene: DashboardScene;
+
+    // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
+    if (isDashboardV2Spec(version.data as Dashboard | DashboardV2Spec)) {
+      const api = await getDashboardAPI('v2');
+      const dto = await api.getDashboardDTO(version.uid);
+      dashScene = transformSaveModelSchemaV2ToScene(dto);
+    } else {
+      const { DashboardModel } = await import(
+        /* webpackChunkName: "dashboard-legacy-model" */ 'app/features/dashboard/state/DashboardModel'
+      );
+      const dashboardDTO: DashboardDTO = {
+        // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- v1 restore path requires Dashboard type
+        dashboard: new DashboardModel(version.data as Dashboard),
+        meta: this.state.meta,
+      };
+
+      await resolveLegacyDatasourceNames(dashboardDTO.dashboard);
+      dashScene = transformSaveModelToScene(dashboardDTO);
+    }
+
+    const { loadingView, ...newState } = sceneUtils.cloneSceneObjectState(dashScene.state);
+    newState.version = versionRsp.version;
+
+    this.setState(newState);
+    this.exitEditMode({ skipConfirm: true, restoreInitialState: false });
+
+    return true;
+  };
+
+  public async openSaveDrawer({
+    showDiff,
+    saveAsCopy,
+    saveDashboardTemplate,
+    saveAsDashboardTemplate,
+    onSaveSuccess,
+    onDismiss,
+    recoverToNewBranch,
+  }: {
+    saveAsCopy?: boolean;
+    saveDashboardTemplate?: boolean;
+    saveAsDashboardTemplate?: boolean;
+    onSaveSuccess?: () => void;
+    onDismiss?: () => void;
+    recoverToNewBranch?: RecoverToNewBranch;
+    showDiff?: boolean;
+  }) {
+    if (!this.state.isEditing) {
+      return;
+    }
+
+    // Edits to pending changes are recorded as they're made; Apply saves them to the dashboard.
+    // A new dashboard's are saved as the dashboard, here.
+    if (this.recordsToPendingChanges() && !saveAsCopy && !saveAsDashboardTemplate) {
+      return;
+    }
+
+    const overlay = this.state.overlay;
+    if (showDiff && overlay) {
+      const { SaveDashboardDrawer } = await import(
+        /* webpackChunkName: "save-dashboard-drawer" */ '../saving/SaveDashboardDrawer'
+      );
+      if (this.state.overlay !== overlay || !this.state.isEditing) {
+        return;
+      }
+      if (overlay instanceof SaveDashboardDrawer) {
+        overlay.setState({ showDiff: true });
+        return;
+      }
+    }
+
+    await this.loadView(
+      dashboardViews.overlay.save(
+        this,
+        {
+          showDiff,
+          saveAsCopy,
+          saveAsDashboardTemplate,
+          saveDashboardTemplate,
+          onSaveSuccess,
+          onDismiss,
+          recoverToNewBranch,
+        },
+        () => this.hasVariableErrors()
+      )
+    );
+  }
+
+  public getPageNav(location: H.Location, navIndex: NavIndex) {
+    const { meta, viewPanel, editPanel, title, uid } = this.state;
+    const isNew = !Boolean(uid);
+    // A new dashboard's preview has no uid yet: its page is the uid it is proposed under.
+    const previewedUid = previewedDashboardUid(this.state);
+    // Trailing slash enforces a path-segment match so unrelated prefixes (e.g. `/dashboard/provisioning-foo/...`) don't match.
+    const isProvisioningPreview = location.pathname.startsWith(PROVISIONING_PREVIEW_URL + '/');
+    const clearPanelView = {
+      viewPanel: null,
+      inspect: null,
+      editview: null,
+      editPanel: null,
+      tab: null,
+      shareView: null,
+    };
+
+    let pageNav: NavModelItem = {
+      text: title,
+      highlightText: getLifecycleBreadcrumbLabel(getPendingChangePreview('page', previewedUid)),
+      url: isProvisioningPreview
+        ? locationUtil.getUrlForPartial(location, clearPanelView)
+        : locationUtil.assureBaseUrl(
+            getDashboardUrl({
+              uid: uid || previewedUid,
+              slug: meta.slug,
+              currentQueryParams: location.search,
+              updateQuery: clearPanelView,
+              isHomeDashboard: !meta.url && !meta.slug && !isNew && !meta.isSnapshot,
+              isSnapshot: meta.isSnapshot,
+            })
+          ),
+    };
+
+    const { folderUid } = meta;
+
+    if (folderUid) {
+      const folderNavModel = getNavModel(navIndex, `folder-dashboards-${folderUid}`).main;
+      // If the folder hasn't loaded (maybe user doesn't have permission on it?) then
+      // don't show the "page not found" breadcrumb
+      if (folderNavModel.id !== 'not-found') {
+        pageNav = {
+          ...pageNav,
+          parentItem: folderNavModel,
+        };
+      }
+    }
+
+    if (viewPanel) {
+      pageNav = {
+        text: t('dashboard-scene.dashboard-scene.text.view-panel', 'View panel'),
+        parentItem: pageNav,
+        url: locationUtil.getUrlForPartial(locationService.getLocation(), {
+          viewPanel: viewPanel,
+          editPanel: undefined,
+        }),
+      };
+    }
+
+    if (editPanel) {
+      pageNav = {
+        text: t('dashboard-scene.dashboard-scene.text.edit-panel', 'Edit panel'),
+        parentItem: pageNav,
+      };
+    }
+
+    return pageNav;
+  }
+
+  public getInitialState(): DashboardSceneState | undefined {
+    return this._initialState;
+  }
+
+  public addPanel(vizPanel: VizPanel): void {
+    // onEnterEditMode can no-op without throwing (e.g. blocked on mobile) -- its return value is
+    // the only reliable signal that it actually happened.
+    if (!this.state.isEditing && !this.onEnterEditMode()) {
+      return;
+    }
+
+    // Add panel to layout
+    this.state.body.addPanel(vizPanel);
+  }
+
+  public createLibraryPanel(panelToReplace: VizPanel, libPanel: LibraryPanel) {
+    const behavior = new LibraryPanelBehavior({ uid: libPanel.uid, name: libPanel.name });
+
+    const parent = panelToReplace.parent;
+
+    if (parent instanceof DashboardGridItem) {
+      const body = panelToReplace.clone({
+        $behaviors: [behavior],
+      });
+      parent.setState({ body });
+      return;
+    }
+
+    if (parent instanceof AutoGridItem) {
+      // Auto grid only supports creating library panels from the source panel (AutoGridItem.state.body).
+      const body = parent.state.body.clone({
+        $behaviors: [behavior],
+      });
+      parent.setState({ body });
+      parent.handleEditChange();
+      return;
+    }
+
+    throw new Error("Trying to replace a panel that doesn't have a parent layout item");
+  }
+
+  public duplicatePanel(vizPanel: VizPanel) {
+    duplicatePanel(vizPanel);
+  }
+
+  public copyPanel(vizPanel: VizPanel) {
+    if (isDashboardNewLayoutsEnabled()) {
+      const gridItem = vizPanel.parent;
+
+      if (gridItem instanceof AutoGridItem) {
+        const elements = getElement(gridItem, this);
+        const gridItemKind = serializeAutoGridItem(gridItem);
+
+        clearClipboard();
+        store.set(LS_PANEL_COPY_KEY, JSON.stringify({ elements, gridItem: gridItemKind }));
+      } else if (gridItem instanceof DashboardGridItem) {
+        const elements = getElement(gridItem, this);
+        const gridItemKind = gridItemToGridLayoutItemKind(gridItem);
+
+        clearClipboard();
+        store.set(LS_PANEL_COPY_KEY, JSON.stringify({ elements, gridItem: gridItemKind }));
+      } else {
+        console.error('Trying to copy a panel that is not DashboardGridItem child');
+        throw new Error('Trying to copy a panel that is not DashboardGridItem child');
+      }
+      return;
+    }
+
+    if (!vizPanel.parent) {
+      return;
+    }
+
+    let gridItem = vizPanel.parent;
+
+    if (!(gridItem instanceof DashboardGridItem)) {
+      console.error('Trying to copy a panel that is not DashboardGridItem child');
+      throw new Error('Trying to copy a panel that is not DashboardGridItem child');
+    }
+
+    const jsonData = gridItemToPanel(gridItem);
+
+    clearClipboard();
+    store.set(LS_PANEL_COPY_KEY, JSON.stringify(jsonData));
+  }
+
+  public pastePanel() {
+    if (!store.exists(LS_PANEL_COPY_KEY)) {
+      return;
+    }
+
+    if (isDashboardNewLayoutsEnabled()) {
+      const layout = getLayoutForObject(this);
+      if (layout) {
+        layout.pastePanel();
+        return;
+      }
+    }
+
+    const jsonData = store.get(LS_PANEL_COPY_KEY);
+    const jsonObj = JSON.parse(jsonData);
+    const panelModel = new PanelModel(jsonObj);
+    const gridItem = buildGridItemForPanel(panelModel);
+    const panel = gridItem.state.body;
+
+    this.addPanel(panel);
+
+    store.delete(LS_PANEL_COPY_KEY);
+  }
+
+  /** @internal */
+  private static extractPanelStyles(panel: VizPanel, styleConfig: PanelStyleConfig): PanelStyles {
+    const styles: PanelStyles = {};
+
+    if (!panel.state.fieldConfig?.defaults) {
+      return styles;
+    }
+
+    styles.fieldConfig = { defaults: {} };
+
+    const defaults = styles.fieldConfig.defaults;
+    const panelDefaults = panel.state.fieldConfig.defaults;
+
+    // default props (color)
+    for (const key of styleConfig.fieldConfig.defaultsProps) {
+      copyFieldConfigPropIfDefined(panelDefaults, defaults, key);
+    }
+
+    // custom props (lineWidth, fillOpacity, etc.)
+    if (panel.state.fieldConfig.defaults.custom) {
+      const customDefaults: Record<string, unknown> = {};
+      const panelCustom: Record<string, unknown> = panel.state.fieldConfig.defaults.custom;
+
+      for (const key of styleConfig.fieldConfig.customProps) {
+        const value = panelCustom[key];
+        if (value !== undefined) {
+          customDefaults[key] = value;
+        }
+      }
+
+      defaults.custom = customDefaults;
+    }
+
+    // panel-level options (colorMode, graphMode, textMode, etc.)
+    if (styleConfig.options?.props && panel.state.options) {
+      const extracted = extractOptionProps(panel.state.options, styleConfig.options.props);
+      if (Object.keys(extracted).length > 0) {
+        styles.options = extracted;
+      }
+    }
+
+    return styles;
+  }
+
+  /** @internal */
+  public copyPanelStyles(vizPanel: VizPanel) {
+    const panelType = vizPanel.state.pluginId;
+    const styleConfig = getPanelStyleConfig(panelType);
+
+    if (!styleConfig) {
+      return;
+    }
+
+    const stylesToCopy: CopiedPanelStyles = {
+      panelType,
+      styles: DashboardScene.extractPanelStyles(vizPanel, styleConfig),
+    };
+
+    store.set(LS_STYLES_COPY_KEY, JSON.stringify(stylesToCopy));
+    appEvents.emit('alert-success', ['Panel styles copied.']);
+  }
+
+  /** @internal */
+  public static hasPanelStylesToPaste(panelType: string): boolean {
+    const stylesJson = store.get(LS_STYLES_COPY_KEY);
+    if (!stylesJson) {
+      return false;
+    }
+
+    try {
+      const stylesCopy: CopiedPanelStyles = JSON.parse(stylesJson);
+      return (
+        stylesCopy.panelType === panelType &&
+        isPlainObject(stylesCopy.styles) &&
+        (stylesCopy.styles.options === undefined || isPlainObject(stylesCopy.styles.options)) &&
+        (stylesCopy.styles.fieldConfig === undefined || isPlainObject(stylesCopy.styles.fieldConfig))
+      );
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /** @internal */
+  public pastePanelStyles(vizPanel: VizPanel) {
+    const stylesJson = store.get(LS_STYLES_COPY_KEY);
+    if (!stylesJson) {
+      return;
+    }
+
+    try {
+      const stylesCopy: CopiedPanelStyles = JSON.parse(stylesJson);
+
+      const panelType = vizPanel.state.pluginId;
+
+      if (stylesCopy.panelType !== panelType) {
+        return;
+      }
+
+      if (stylesCopy.styles.fieldConfig?.defaults) {
+        const newDefaults = {
+          ...vizPanel.state.fieldConfig?.defaults,
+          ...stylesCopy.styles.fieldConfig.defaults,
+        };
+
+        if (stylesCopy.styles.fieldConfig.defaults.custom) {
+          newDefaults.custom = {
+            ...vizPanel.state.fieldConfig?.defaults?.custom,
+            ...stylesCopy.styles.fieldConfig.defaults.custom,
+          };
+        }
+
+        vizPanel.onFieldConfigChange({
+          ...vizPanel.state.fieldConfig,
+          defaults: newDefaults,
+        });
+      }
+
+      if (stylesCopy.styles.options) {
+        vizPanel.onOptionsChange({
+          ...vizPanel.state.options,
+          ...stylesCopy.styles.options,
+        });
+      }
+
+      appEvents.emit('alert-success', ['Panel styles applied.']);
+    } catch (e) {
+      console.error('Error pasting panel styles:', e);
+      appEvents.emit('alert-error', ['Error pasting panel styles.']);
+      DashboardInteractions.panelStylesMenuClicked(
+        'paste',
+        vizPanel.state.pluginId,
+        getPanelIdForVizPanel(vizPanel) ?? -1,
+        true
+      );
+    }
+  }
+
+  public removePanel(panel: VizPanel) {
+    getLayoutManagerFor(panel).removePanel?.(panel);
+  }
+
+  public updatePanelTitle(panel: VizPanel, title: string) {
+    panel.setState({ title, hoverHeader: getUpdatedHoverHeader(title, panel.state.$timeRange?.state) });
+  }
+
+  public async changePanelPlugin(
+    panel: VizPanel,
+    newPluginId: string,
+    newOptions?: Record<string, unknown>,
+    newFieldConfig?: FieldConfigSource
+  ) {
+    const { fieldConfig: prevFieldConfig, pluginId: previousPluginId } = panel.state;
+
+    let cleanFieldConfig: FieldConfigSource = {
+      defaults: { ...prevFieldConfig.defaults, custom: {} },
+      overrides: filterFieldConfigOverrides(prevFieldConfig.overrides, isStandardFieldProp),
+    };
+
+    if (newFieldConfig) {
+      cleanFieldConfig = { ...newFieldConfig, overrides: cleanFieldConfig.overrides };
+    }
+
+    await panel.changePluginType(newPluginId, newOptions, cleanFieldConfig);
+
+    if (newOptions) {
+      panel.onOptionsChange(newOptions, true);
+    }
+
+    if (newFieldConfig) {
+      panel.onFieldConfigChange({ ...newFieldConfig, overrides: cleanFieldConfig.overrides }, true);
+    }
+
+    const pluginMeta = await getPanelPluginMeta(newPluginId);
+    const skipDataQuery = pluginMeta?.skipDataQuery ?? false;
+
+    if (pluginMeta?.skipDefaultQuery && previousPluginId === UNCONFIGURED_PANEL_PLUGIN_ID) {
+      clearDefaultQuery(panel);
+    }
+
+    if (skipDataQuery && panel.state.$data) {
+      panel.setState({ $data: undefined });
+    }
+
+    if (!skipDataQuery && !panel.state.$data) {
+      const defaultDs = getDataSourceSrv().getInstanceSettings(null);
+      panel.setState({
+        $data: new SceneDataTransformer({
+          $data: new SceneQueryRunner({
+            // The query editor needs the datasource type, which config.defaultDatasource does not provide.
+            datasource: defaultDs ? { uid: defaultDs.uid, type: defaultDs.type } : undefined,
+            ...(pluginMeta?.skipDefaultQuery ? getEmptyQueryRunnerState() : { queries: [createDefaultQuery()] }),
+          }),
+          transformations: [],
+        }),
+      });
+    }
+  }
+
+  public unlinkLibraryPanel(panel: VizPanel) {
+    if (!panel.parent) {
+      return;
+    }
+
+    const parent = panel.parent;
+
+    if (parent instanceof DashboardGridItem) {
+      parent.state.body.setState({ $behaviors: undefined });
+      return;
+    }
+
+    if (parent instanceof AutoGridItem) {
+      parent.state.body.setState({ $behaviors: undefined });
+      parent.handleEditChange();
+      return;
+    }
+
+    console.error('Trying to unlink a lib panel in a layout that is not DashboardGridItem or AutoGridItem');
+  }
+
+  /** Cancel pending views and sidebar panes before a view transition starts. */
+  public cancelPendingViews() {
+    this._viewRequest?.abort();
+    this.state.sidebar.cancelPaneRequest();
+  }
+
+  public async openFiltersOverview() {
+    await this.loadView(dashboardViews.overlay.filters());
+  }
+
+  public async showModalAsync(load: () => Promise<SceneObject | undefined>) {
+    await this.loadView({ key: 'overlay', load });
+  }
+
+  /** Apply a lazy view only if no newer transition superseded it while loading. */
+  public async loadView(view: DashboardViewRequest) {
+    this.cancelPendingViews();
+    const request = new AbortController();
+    this._viewRequest = request;
+    request.signal.addEventListener(
+      'abort',
+      () => {
+        if (this._viewRequest === request) {
+          super.setState({ loadingView: undefined });
+        }
+      },
+      { once: true }
+    );
+    // Loading bookkeeping must not cancel the request it belongs to.
+    super.setState({ loadingView: view.key, ...(view.key === 'overlay' ? { overlay: undefined } : {}) });
+    // Some overlays and editor transitions are applied directly through setState.
+    const subscription = this.subscribeToState((state, previous) => {
+      if (dashboardViewChanged(state, previous)) {
+        request.abort();
+      }
+    });
+    const location = locationService.getLocation();
+    const search = new URLSearchParams(location.search);
+    // Time range and variable URL updates do not supersede a view request.
+    const unlisten = locationService.getHistory().listen((nextLocation) => {
+      const nextSearch = new URLSearchParams(nextLocation.search);
+      if (
+        nextLocation.pathname !== location.pathname ||
+        ['orgId', 'editPanel', 'viewPanel', 'editview', 'inspect', 'shareView'].some(
+          (key) => nextSearch.get(key) !== search.get(key)
+        )
+      ) {
+        if (
+          this._viewRequest === request &&
+          !request.signal.aborted &&
+          view.key === 'editPanel' &&
+          nextLocation.pathname === location.pathname &&
+          nextSearch.get('orgId') === search.get('orgId') &&
+          nextSearch.get('editPanel') !== search.get('editPanel')
+        ) {
+          // Resolve the new editor before cancellation can publish the old held panel ID back into the URL.
+          this._urlSync.updateFromUrl({ editPanel: nextSearch.get('editPanel') });
+        }
+        request.abort();
+      }
+    });
+    let cleanedUp = false;
+    const cleanup = () => {
+      if (cleanedUp) {
+        return;
+      }
+      cleanedUp = true;
+      subscription.unsubscribe();
+      unlisten();
+    };
+    try {
+      const value = await view.load(request.signal);
+      if (value !== undefined && !request.signal.aborted) {
+        // Committing the view can normalize its URL; that is not a new navigation request.
+        cleanup();
+        this.setState({ [view.key]: value });
+      }
+    } finally {
+      cleanup();
+      if (this._viewRequest === request) {
+        request.abort();
+        // Clearing loading state can synchronously start another request.
+        if (this._viewRequest === request) {
+          this._viewRequest = undefined;
+        }
+      }
+    }
+  }
+
+  public showModal(modal: SceneObject) {
+    this.cancelPendingViews();
+    this.setState({ overlay: modal });
+  }
+
+  public closeModal() {
+    this.cancelPendingViews();
+    this.setState({ overlay: undefined });
+  }
+
+  /**
+   * True while an unbuilt dashboard plan is being previewed on this scene. The preview is a
+   * static, view-mode surface: it never enters edit mode, so there is no exit-edit-mode dance and
+   * no `_initialState` snapshot to restore later.
+   */
+  public isPlanning(): boolean {
+    return this.state.planning !== undefined;
+  }
+
+  public onOpenSettings = () => {
+    if (!canManuallyEditDashboard(this.state)) {
+      return;
+    }
+    if (isEditEntryBlocked(this)) {
+      notifyMobileEditNotAvailable();
+      return;
+    }
+    const editview = this.state.meta.isDashboardTemplate ? 'template' : 'settings';
+    locationService.partial({ editview });
+  };
+
+  public onShowAddLibraryPanelDrawer(panelToReplaceRef?: SceneObjectRef<VizPanel>) {
+    this.showModal(new AddLibraryPanelDrawer({ panelToReplaceRef }));
+  }
+
+  public onCreateNewRow() {
+    return addNewRowTo(this.state.body);
+  }
+
+  public async onCreateNewPanel(): Promise<VizPanel> {
+    const profiler = getDashboardSceneProfiler();
+    const vizPanel = await getDefaultVizPanel();
+    profiler.attachProfilerToPanel(vizPanel);
+
+    this.addPanel(vizPanel);
+    return vizPanel;
+  }
+
+  public switchLayout(layout: DashboardLayoutManager, skipUndo?: boolean) {
+    const currentLayout = this.state.body;
+    const perform = () => this.setState({ body: layout });
+    const undo = () => this.setState({ body: currentLayout });
+    if (skipUndo) {
+      perform();
+    } else {
+      edit({
+        meta: { actionId: 'layout.switch', scope: 'dashboard' },
+        description: t('dashboard.edit-actions.switch-layout', 'Switch layout'),
+        source: this,
+        perform,
+        undo,
+      });
+    }
+  }
+
+  public getLayout(): AnyDashboardLayoutManager {
+    return this.state.body;
+  }
+
+  /**
+   * Called by the SceneQueryRunner to provide contextual parameters (tracking) props for the request
+   */
+  public enrichDataRequest(sceneObject: SceneObject): Partial<DataQueryRequest> {
+    const dashboard = getDashboardSceneFor(sceneObject);
+
+    let panel = getClosestVizPanel(sceneObject);
+
+    if (dashboard.state.isEditing && dashboard.state.editPanel) {
+      panel = dashboard.state.editPanel.state.panelRef.resolve();
+    }
+
+    let panelId = 0;
+
+    if (panel && panel.state.key) {
+      if (isRepeatCloneOrChildOf(panel)) {
+        // We check if any of the panel ancestors are clones because we can't use the original panel ID in this case
+        panelId = djb2Hash(panel.getPathId());
+      } else {
+        // Otherwise, it's the absolute original panel, and we can use the key directly
+        // getPanelIdForVizPanel extracts the panel ID from the key so we don't need to do it manually
+        panelId = getPanelIdForVizPanel(panel);
+      }
+    }
+
+    return {
+      app: CoreApp.Dashboard,
+      dashboardUID: this.state.uid,
+      panelId,
+      panelName: panel?.state?.title,
+      panelPluginId: panel?.state.pluginId,
+      dashboardTitle: this.state.title,
+    };
+  }
+
+  canEditDashboard() {
+    const {
+      meta: { isSnapshot, isEmbedded, canEdit, canMakeEditable },
+    } = this.state;
+    return !isSnapshot && !isEmbedded && Boolean(canEdit || canMakeEditable || config.viewersCanEdit);
+  }
+
+  public getInitialSaveModel() {
+    return this.serializer.initialSaveModel;
+  }
+
+  public getSnapshotUrl() {
+    return this.serializer.getSnapshotUrl() ?? '';
+  }
+
+  /** Hacky temp function until we refactor transformSaveModelToScene a bit */
+  setInitialSaveModel(model?: Dashboard, meta?: DashboardMeta, apiVersion?: string): void;
+  setInitialSaveModel(
+    model?: DashboardV2Spec,
+    meta?: DashboardWithAccessInfo<DashboardV2Spec>['metadata'],
+    apiVersion?: string
+  ): void;
+  public setInitialSaveModel(
+    saveModel?: Dashboard | DashboardV2Spec,
+    meta?: DashboardMeta | DashboardWithAccessInfo<DashboardV2Spec>['metadata'],
+    apiVersion?: string
+  ): void {
+    this.serializer.initializeElementMapping(saveModel);
+    this.serializer.initializeDSReferencesMapping(saveModel);
+    const sortedModel = sortedDeepCloneWithoutNulls(saveModel);
+    this.serializer.initialSaveModel = sortedModel;
+    this.serializer.metadata = meta;
+    this.serializer.apiVersion = apiVersion;
+  }
+
+  public getTrackingInformation() {
+    return this.serializer.getTrackingInformation(this);
+  }
+
+  public getDynamicDashboardsTrackingInformation() {
+    return this.serializer.getDynamicDashboardsTrackingInformation(this);
+  }
+
+  public async onDashboardDelete() {
+    // Need to mark it non dirty to navigate away without unsaved changes warning
+    this.setState({ isDirty: false });
+    locationService.replace('/');
+  }
+
+  public getDashboardPanels() {
+    return dashboardSceneGraph.getVizPanels(this);
+  }
+
+  public getTransformationCounts(saveModel?: Dashboard | DashboardV2Spec): Record<string, number> | undefined {
+    const model = saveModel ?? this.getSaveModel();
+
+    const transformationCounts = new Map<string, number>();
+
+    // Handle V1 dashboards
+    if ('panels' in model && model.panels) {
+      for (const panel of model.panels) {
+        // Count transformations
+        if ('transformations' in panel && Array.isArray(panel.transformations)) {
+          for (const transformation of panel.transformations) {
+            const transformId = transformation?.id;
+            if (typeof transformId === 'string' && transformId) {
+              transformationCounts.set(transformId, (transformationCounts.get(transformId) || 0) + 1);
+            }
+          }
+        }
+      }
+    }
+
+    // Handle V2 dashboards
+    if ('elements' in model && model.elements) {
+      for (const element of Object.values(model.elements)) {
+        // Check if element is a Panel (not LibraryPanel)
+        if (element.kind !== 'Panel') {
+          continue;
+        }
+
+        const dataSpec = element.spec.data?.spec;
+        if (!dataSpec || typeof dataSpec !== 'object') {
+          continue;
+        }
+
+        // Count transformations
+        const transformations = dataSpec.transformations;
+        if (Array.isArray(transformations)) {
+          for (const transformation of transformations) {
+            const normalized = normalizeTransformation(transformation);
+            transformationCounts.set(normalized.group, (transformationCounts.get(normalized.group) || 0) + 1);
+          }
+        }
+      }
+    }
+
+    if (transformationCounts.size === 0) {
+      return undefined;
+    }
+
+    // Convert map to object
+    return Object.fromEntries(transformationCounts);
+  }
+
+  public getExpressionCounts(saveModel?: Dashboard | DashboardV2Spec): Record<string, number> | undefined {
+    const model = saveModel ?? this.getSaveModel();
+
+    const expressionCounts = new Map<string, number>();
+
+    // Handle V1 dashboards
+    if ('panels' in model && model.panels) {
+      for (const panel of model.panels) {
+        // Count expressions from targets
+        if ('targets' in panel && panel.targets?.length) {
+          for (const target of panel.targets) {
+            // Only count if it's actually an expression query
+            const datasourceUid =
+              target?.datasource && typeof target.datasource === 'object' && 'uid' in target.datasource
+                ? target.datasource.uid
+                : undefined;
+
+            const targetType = target?.type;
+            if (datasourceUid === '__expr__' && typeof targetType === 'string' && targetType) {
+              expressionCounts.set(targetType, (expressionCounts.get(targetType) || 0) + 1);
+            }
+          }
+        }
+      }
+    }
+
+    // Handle V2 dashboards
+    if ('elements' in model && model.elements) {
+      for (const element of Object.values(model.elements)) {
+        // Check if element is a Panel (not LibraryPanel)
+        if (element.kind !== 'Panel') {
+          continue;
+        }
+
+        const dataSpec = element.spec.data?.spec;
+        if (!dataSpec || typeof dataSpec !== 'object') {
+          continue;
+        }
+
+        // Count expressions from queries
+        const queries = dataSpec.queries;
+        if (Array.isArray(queries)) {
+          for (const query of queries) {
+            const querySpec = query?.spec?.query;
+            if (!querySpec || typeof querySpec !== 'object') {
+              continue;
+            }
+
+            const datasource = querySpec.datasource;
+            const datasourceName =
+              datasource && typeof datasource === 'object' && 'name' in datasource ? datasource.name : undefined;
+
+            const spec = querySpec.spec;
+            const queryType = spec && typeof spec === 'object' && 'type' in spec ? spec.type : undefined;
+
+            if (datasourceName === '__expr__' && typeof queryType === 'string' && queryType) {
+              expressionCounts.set(queryType, (expressionCounts.get(queryType) || 0) + 1);
+            }
+          }
+        }
+      }
+    }
+
+    if (expressionCounts.size === 0) {
+      return undefined;
+    }
+
+    // Convert map to object
+    return Object.fromEntries(expressionCounts);
+  }
+
+  public onSetScrollRef = (scrollElement: ScrollRefElement): void => {
+    this._scrollRef = scrollElement;
+  };
+
+  public rememberScrollPos() {
+    this._prevScrollPos = this._scrollRef?.scrollTop;
+  }
+
+  public restoreScrollPos() {
+    if (this._prevScrollPos !== undefined) {
+      this._scrollRef?.scrollTo(0, this._prevScrollPos!);
+    }
+  }
+
+  public scrollToRow(drow: string) {
+    locationService.partial({ drow: null }, true);
+    this._stopFollowingRow?.();
+
+    if (this._scrollToRowAndFollow(drow)) {
+      this._pendingRowScroll = undefined;
+      return;
+    }
+
+    // The target row may not exist yet: repeated rows/tabs are only created (and their
+    // repeat-local slugs only interpolate correctly) once the repeat variable resolves and
+    // the repeater runs, which happens after url sync. The repeaters publish
+    // NewSceneObjectAddedEvent when done, so keep the slug pending and retry on that event.
+    this._pendingRowScroll = drow;
+    this._pendingRowScrollSub ??= this.subscribeToEvent(NewSceneObjectAddedEvent, () => {
+      if (this._pendingRowScroll && this._scrollToRowAndFollow(this._pendingRowScroll)) {
+        this._pendingRowScroll = undefined;
+      }
+    });
+  }
+
+  private _scrollToRowAndFollow(drow: string): boolean {
+    const row = scrollToRow(drow, this.state.body);
+    if (!row) {
+      return false;
+    }
+
+    this._stopFollowingRow = keepRowInViewWhileLayoutSettles(row);
+    return true;
+  }
+
+  getSaveModel(): Dashboard | DashboardV2Spec {
+    return this.serializer.getSaveModel(this);
+  }
+
+  // Helper method to build K8s resource structure
+  private buildResourceForCreate(spec: Dashboard | DashboardV2Spec, isNew: boolean): ResourceForCreate<unknown> {
+    const { meta } = this.state;
+    const apiVersion =
+      this.serializer instanceof V2DashboardSerializer
+        ? dashboardAPIVersionResolver.getV2()
+        : dashboardAPIVersionResolver.getV1();
+    return {
+      apiVersion: `dashboard.grafana.app/${apiVersion}`,
+      kind: 'Dashboard',
+      metadata: {
+        ...meta.k8s,
+        name: isNew ? undefined : (meta.uid ?? meta.k8s?.name),
+        generateName: isNew ? 'd' : undefined,
+      },
+      spec,
+    };
+  }
+
+  // Get the dashboard in native K8s form (using the appropriate apiVersion)
+  getSaveResource(options: SaveDashboardAsOptions): ResourceForCreate<unknown> {
+    const spec = this.getSaveAsModel(options);
+    return this.buildResourceForCreate(spec, options.isNew ?? false);
+  }
+
+  // Wrap a raw dashboard spec in K8s resource format
+  // Used by JSON model editor for Git sync dashboards
+  getSaveResourceFromSpec(rawSpec: Dashboard | DashboardV2Spec): ResourceForCreate<unknown> {
+    return this.buildResourceForCreate(rawSpec, false);
+  }
+
+  // Get raw JSON from JSON model editor if currently active
+  // Returns undefined if not in JSON editor mode or if JSON is invalid
+  getRawJsonFromEditor(): Dashboard | DashboardV2Spec | undefined {
+    if (this.state.editview?.getEditedSaveModel) {
+      try {
+        // The v2 editor holds a full resource envelope; getEditedSaveModel unwraps it back to the bare spec.
+        return this.state.editview.getEditedSaveModel();
+      } catch {
+        return undefined;
+      }
+    }
+    return undefined;
+  }
+
+  getSaveAsModel(options: SaveDashboardAsOptions): Dashboard | DashboardV2Spec {
+    return this.serializer.getSaveAsModel(this, options);
+  }
+
+  getDashboardChanges(saveTimeRange?: boolean, saveVariables?: boolean, saveRefresh?: boolean): DashboardChangeInfo {
+    const rawJson = this.getRawJsonFromEditor();
+    return this.serializer.getDashboardChangesFromScene(this, { saveTimeRange, saveVariables, saveRefresh, rawJson });
+  }
+
+  getManagerKind(): ManagerKind | undefined {
+    return this.state.meta.k8s?.annotations?.[AnnoKeyManagerKind];
+  }
+
+  getManagerIdentity(): string | undefined {
+    // get repo name if any
+    return this.state.meta.k8s?.annotations?.[AnnoKeyManagerIdentity];
+  }
+
+  isManaged() {
+    return Boolean(this.getManagerKind());
+  }
+
+  isLibraryPanel(vizPanel: VizPanel) {
+    return isLibraryPanel(vizPanel);
+  }
+
+  isManagedRepository() {
+    if (!config.provisioningEnabled) {
+      return false;
+    }
+    return Boolean(this.getManagerKind() === ManagerKind.Repo);
+  }
+
+  managedResourceCannotBeEdited() {
+    return (
+      this.isManaged() && !this.isManagedRepository() && !this.state.meta.k8s?.annotations?.[AnnoKeyManagerAllowsEdits]
+    );
+  }
+
+  getPath() {
+    return this.state.meta.k8s?.annotations?.[AnnoKeySourcePath];
+  }
+
+  private hasVariableErrors(): boolean {
+    return Boolean(this.state.$variables?.state.variables.find((v) => Boolean(v.state.error)));
+  }
+
+  /**
+   * Default layout used for new Tab and Row containers.
+   * Dashboards without a persisted layout preference follow the instance default:
+   * auto grid when the auto grid feature flag is enabled, classic grid otherwise.
+   */
+  getDefaultLayout(): DashboardLayoutManager {
+    if (this.state.preferences?.defaultLayoutTemplate) {
+      return this.state.preferences.defaultLayoutTemplate.clone();
+    }
+
+    return this.isAutoGridInstanceDefault()
+      ? AutoGridLayoutManager.createEmpty()
+      : DefaultGridLayoutManager.createEmpty();
+  }
+
+  getDefaultLayoutType() {
+    if (this.state.preferences?.defaultLayoutTemplate) {
+      return this.state.preferences.defaultLayoutTemplate.descriptor.id;
+    }
+
+    return this.isAutoGridInstanceDefault()
+      ? AutoGridLayoutManager.descriptor.id
+      : DefaultGridLayoutManager.descriptor.id;
+  }
+
+  private isAutoGridInstanceDefault(): boolean {
+    return getFeatureFlagClient().getBooleanValue(FlagKeys.GrafanaDashboardAutoGridDefault, true);
+  }
+
+  updateDefaultLayoutTemplate(template: DashboardLayoutManager) {
+    this.setState({
+      preferences: {
+        ...this.state.preferences,
+        defaultLayoutTemplate: template.clone(),
+      },
+    });
+  }
+}
+
+class DashboardVariableDependency implements SceneVariableDependencyConfigLike {
+  private _emptySet = new Set<string>();
+
+  public constructor(private _dashboard: DashboardScene) {}
+
+  getNames(): Set<string> {
+    return this._emptySet;
+  }
+
+  public hasDependencyOn(): boolean {
+    return false;
+  }
+
+  public variableUpdateCompleted(variable: SceneVariable, hasChanged: boolean) {
+    if (hasChanged) {
+      // Temp solution for some core panels (like dashlist) to know that variables have changed
+      appEvents.publish(new VariablesChanged({ refreshAll: true, panelIds: [] }));
+      // Backwards compat with plugins that rely on the RefreshEvent when a
+      // variable changes. TODO: We should redirect plugin devs to use VariablesChanged event
+      this._dashboard.publishEvent(new RefreshEvent());
+    }
+
+    if (variable.state.name === PANEL_SEARCH_VAR) {
+      const searchValue = variable.getValue();
+      if (typeof searchValue === 'string') {
+        this._dashboard.setState({ panelSearch: searchValue });
+      }
+    } else if (variable.state.name === PANELS_PER_ROW_VAR) {
+      const panelsPerRow = variable.getValue();
+      if (typeof panelsPerRow === 'string') {
+        const perRow = Number.parseInt(panelsPerRow, 10);
+        this._dashboard.setState({ panelsPerRow: Number.isInteger(perRow) ? perRow : undefined });
+      }
+    }
+  }
+}

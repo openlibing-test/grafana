@@ -1,0 +1,36 @@
+# Resource-kind descriptors
+
+Each `*.json` file in this directory adds one resource type to the generic provisioning
+harness (`pkg/tests/apis/provisioning/resourcekinds`). Dropping a descriptor here is all that is
+needed to run the full battery — export, selective export, sync/pull, files CRUD, and bulk
+delete/move jobs — against a new kind. No Go changes are required.
+
+## Format
+
+```json
+{
+  "folderScoped": false,
+  "featureFlags": ["playlistsRBAC"],
+  "manifest": {
+    "apiVersion": "playlist.grafana.app/v1",
+    "kind": "Playlist",
+    "metadata": { "name": "placeholder" },
+    "spec": { "title": "placeholder" }
+  }
+}
+```
+
+- **`manifest`** — a sample resource manifest. The harness patches `metadata.name` and
+  `spec.title` per test instance; other fields are sent as-is. The plural resource is resolved
+  from `apiVersion` + `kind` via API discovery, so it is not declared here.
+- **`folderScoped`** — `true` if provisioning stamps a `grafana.app/folder` annotation on the
+  resource (the kind is declared with the `:folder` capability). Folder-scoped kinds are synced
+  inside a subdirectory so the folder annotation is exercised.
+- **`featureFlags`** — extra feature toggles the kind's apiserver/authorizer needs (raw toggle
+  names). Often empty; playlists need `playlistsRBAC`.
+- **`collection`** — the storage collection the kind's group belongs to, when several API groups
+  share one (each data source plugin serves its own group, all stored in `datasource.grafana.app`).
+  Setting it declares the kind as a wildcard and points the `[unified_storage]` key at the
+  collection. Omit it for a kind that serves its own group.
+
+The file name (without `.json`) is the kind's label, used in subtest names and repository names.

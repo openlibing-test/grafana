@@ -1,0 +1,211 @@
+package dashboardsearch
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/grafana/grafana/apps/dashboard/pkg/apis/dashboard/v0alpha1"
+	common "github.com/grafana/grafana/pkg/apimachinery/apis/common/v0alpha1"
+	"github.com/grafana/grafana/pkg/apimachinery/utils"
+	"github.com/grafana/grafana/pkg/storage/unified/resource"
+	"github.com/grafana/grafana/pkg/storage/unified/resourcepb"
+)
+
+var (
+	// These fields exist at the top-level of DashboardHit
+	standardFields = map[string]string{
+		resource.SEARCH_FIELD_SCORE:            "",
+		resource.SEARCH_FIELD_TITLE:            "",
+		resource.SEARCH_FIELD_FOLDER:           "",
+		resource.SEARCH_FIELD_TAGS:             "",
+		resource.SEARCH_FIELD_DESCRIPTION:      "",
+		resource.SEARCH_FIELD_MANAGER_ID:       "",
+		resource.SEARCH_FIELD_MANAGER_KIND:     "",
+		resource.SEARCH_FIELD_OWNER_REFERENCES: "",
+	}
+
+	APISearchIncludeFields = []string{
+		resource.SEARCH_FIELD_TITLE,
+		resource.SEARCH_FIELD_TAGS,
+		resource.SEARCH_FIELD_FOLDER,
+		resource.SEARCH_FIELD_DESCRIPTION,
+		resource.SEARCH_FIELD_LEGACY_ID,
+		resource.SEARCH_FIELD_LABELS + "." + resource.SEARCH_FIELD_LEGACY_ID,
+	}
+
+	FieldValueIncludeFields = []string{
+		resource.SEARCH_FIELD_TITLE,
+		resource.SEARCH_FIELD_TAGS,
+		resource.SEARCH_FIELD_FOLDER,
+		resource.SEARCH_FIELD_DESCRIPTION,
+		resource.SEARCH_FIELD_CREATED,
+		resource.SEARCH_FIELD_CREATED_BY,
+		resource.SEARCH_FIELD_UPDATED,
+		resource.SEARCH_FIELD_MANAGER_KIND,
+		resource.SEARCH_FIELD_MANAGER_ID,
+		resource.SEARCH_FIELD_SOURCE_PATH,
+		resource.SEARCH_FIELD_SOURCE_CHECKSUM,
+		resource.SEARCH_FIELD_SOURCE_TIME,
+		resource.SEARCH_FIELD_OWNER_REFERENCES,
+		// below is needed to determine whether a provisioned dashboard exists or not
+		resource.SEARCH_FIELD_LEGACY_ID,
+		resource.SEARCH_FIELD_LABELS + "." + resource.SEARCH_FIELD_LEGACY_ID,
+	}
+)
+
+// SearchFunc is in practice only invoking the unified storage search grpc API due to which we handle errors from it as
+// if they were grpc errors. If other implementation are considered the error handling will need changes.
+type SearchFunc func(ctx context.Context, orgID int64, request *resourcepb.ResourceSearchRequest) (*resourcepb.ResourceSearchResponse, error)
+
+// SearchAll executes a search request and paginates through all results by incrementing the offset until the offset is greater than total hits
+// or it hits an empty page.
+// Errors returned by searchFn are passed through unchanged.
+func SearchAll(ctx context.Context, orgID int64, request *resourcepb.ResourceSearchRequest, searchFn SearchFunc) (v0alpha1.SearchResults, error) {
+	if request.Limit == 0 {
+		request.Limit = 100000
+	}
+	request.Page = int64(1)
+	request.Offset = int64(0)
+
+	res, err := searchFn(ctx, orgID, request)
+	if err != nil {
+		return v0alpha1.SearchResults{}, err
+	}
+	results, err := ParseResults(res, 0)
+	if err != nil {
+		return v0alpha1.SearchResults{}, err
+	}
+
+	request.Offset += int64(len(results.Hits))
+	request.Page++
+	for request.Offset < res.TotalHits {
+		res, err = searchFn(ctx, orgID, request)
+		if err != nil {
+			return v0alpha1.SearchResults{}, err
+		}
+
+		page, err := ParseResults(res, 0)
+		if err != nil {
+			return v0alpha1.SearchResults{}, err
+		}
+
+		if len(page.Hits) == 0 {
+			break
+		}
+
+		results.Hits = append(results.Hits, page.Hits...)
+		request.Offset += int64(len(page.Hits))
+		request.Page++
+	}
+
+	return results, nil
+}
+
+// ParseResults decodes a successful search response. Callers must handle the error
+// returned by the search call before calling it.
+func ParseResults(result *resourcepb.ResourceSearchResponse, offset int64) (v0alpha1.SearchResults, error) {
+	if result == nil {
+		return v0alpha1.SearchResults{}, nil
+	}
+
+	if result.ResultFormat != resourcepb.ResourceSearchRequest_FIELD_VALUES {
+		return v0alpha1.SearchResults{}, fmt.Errorf("unsupported search result format %d", result.ResultFormat)
+	}
+
+	sr := v0alpha1.SearchResults{
+		Offset:    offset,
+		TotalHits: result.TotalHits,
+		QueryCost: result.QueryCost,
+		MaxScore:  result.MaxScore,
+		Hits:      make([]v0alpha1.DashboardHit, len(result.Rows)),
+	}
+
+	for i, row := range result.Rows {
+		if row == nil || row.Key == nil {
+			return v0alpha1.SearchResults{}, fmt.Errorf("field-value search result row %d has no resource key", i)
+		}
+		values, err := resource.DecodeSearchValues(result.Fields, row)
+		if err != nil {
+			return v0alpha1.SearchResults{}, fmt.Errorf("decoding field-value search result row %d: %w", i, err)
+		}
+
+		fields := &common.Unstructured{}
+		if row.ResourceVersion != 0 {
+			fields.Set(resource.SEARCH_FIELD_RV, row.ResourceVersion)
+		}
+		for name, value := range values {
+			if _, ok := standardFields[name]; !ok {
+				fields.Set(name, jsonCompatibleValue(value))
+			}
+		}
+
+		hit := &v0alpha1.DashboardHit{
+			Resource: row.Key.Resource,
+			Name:     row.Key.Name,
+			Field:    fields,
+		}
+		if title, ok := values[resource.SEARCH_FIELD_TITLE].(string); ok {
+			hit.Title = title
+		} else {
+			hit.Title = "(no title)"
+		}
+		// The declarations determine these types; comma-ok keeps mixed-version responses from panicking.
+		hit.Folder, _ = values[resource.SEARCH_FIELD_FOLDER].(string)
+		hit.Description, _ = values[resource.SEARCH_FIELD_DESCRIPTION].(string)
+		hit.Tags, _ = values[resource.SEARCH_FIELD_TAGS].([]string)
+		hit.ManagedBy.ID, _ = values[resource.SEARCH_FIELD_MANAGER_ID].(string)
+		if managerKind, ok := values[resource.SEARCH_FIELD_MANAGER_KIND].(string); ok {
+			hit.ManagedBy.Kind = utils.ManagerKind(managerKind)
+		}
+		hit.OwnerReferences, _ = values[resource.SEARCH_FIELD_OWNER_REFERENCES].([]string)
+		if row.Score != nil {
+			hit.Score = row.GetScore()
+		}
+		sr.Hits[i] = *hit
+	}
+
+	sr.Facets = parseFacets(result.Facet)
+	return sr, nil
+}
+
+func parseFacets(facets map[string]*resourcepb.ResourceSearchResponse_Facet) map[string]v0alpha1.FacetResult {
+	if facets == nil {
+		return nil
+	}
+	out := make(map[string]v0alpha1.FacetResult, len(facets))
+	for name, facet := range facets {
+		out[name] = v0alpha1.FacetResult{
+			Field:   facet.Field,
+			Total:   facet.Total,
+			Missing: facet.Missing,
+			Terms:   make([]v0alpha1.TermFacet, len(facet.Terms)),
+		}
+		for i, term := range facet.Terms {
+			out[name].Terms[i] = v0alpha1.TermFacet{Term: term.Term, Count: term.Count}
+		}
+	}
+	return out
+}
+
+func jsonCompatibleValue(value any) any {
+	switch values := value.(type) {
+	case []string:
+		return sliceToAny(values)
+	case []int64:
+		return sliceToAny(values)
+	case []float64:
+		return sliceToAny(values)
+	case []bool:
+		return sliceToAny(values)
+	default:
+		return value
+	}
+}
+
+func sliceToAny[T any](values []T) []any {
+	out := make([]any, len(values))
+	for i, value := range values {
+		out[i] = value
+	}
+	return out
+}

@@ -1,0 +1,661 @@
+import { type PanelPluginMeta } from '@grafana/data';
+import { setPanelPluginMetas } from '@grafana/runtime/internal';
+import { VizPanel } from '@grafana/scenes';
+import {
+  defaultDataQueryKind,
+  defaultFieldConfigSource,
+  defaultPanelQueryKind,
+  defaultPanelSpec,
+  type FieldConfigSource,
+  type PanelKind,
+  type PanelQueryKind,
+  type QueryOptionsSpec,
+} from '@grafana/schema/apis/dashboard.grafana.app/v2';
+import { PanelModel } from 'app/features/dashboard/state/PanelModel';
+import { SHARED_DASHBOARD_QUERY } from 'app/plugins/datasource/dashboard/constants';
+import { MIXED_DATASOURCE_NAME } from 'app/plugins/datasource/mixed/MixedDataSource';
+
+import { PlanPlaceholderBadge } from '../../scene/PlanPlaceholderBadge';
+import { PanelTimeRange } from '../../scene/panel-timerange/PanelTimeRange';
+import { createPanelDataProvider } from '../../utils/createPanelDataProvider';
+import { getQueryRunnerFor } from '../../utils/getQueryRunnerFor';
+import { vizPanelToPanel } from '../transformSceneToSaveModel';
+import { vizPanelToSchemaV2 } from '../transformSceneToSaveModelSchemaV2';
+
+import { buildVizPanel, ensureUniqueRefIds, getPanelDataSource, getRuntimePanelDataSource } from './utils';
+
+describe('getRuntimePanelDataSource', () => {
+  it('should return uid and type when explicit datasource UID is provided', () => {
+    const query: PanelQueryKind = {
+      kind: 'PanelQuery',
+      spec: {
+        refId: 'A',
+        hidden: false,
+        query: {
+          kind: 'DataQuery',
+          version: defaultDataQueryKind().version,
+          group: 'prometheus',
+          datasource: {
+            name: 'prometheus-uid',
+          },
+          spec: {},
+        },
+      },
+    };
+
+    const result = getRuntimePanelDataSource(query.spec.query);
+
+    expect(result).toEqual({
+      uid: 'prometheus-uid',
+      type: 'prometheus',
+    });
+  });
+
+  it('should return type-only when only group is provided (no explicit UID)', () => {
+    const query: PanelQueryKind = {
+      kind: 'PanelQuery',
+      spec: {
+        refId: 'A',
+        hidden: false,
+        query: {
+          kind: 'DataQuery',
+          version: defaultDataQueryKind().version,
+          group: 'prometheus',
+          spec: {},
+        },
+      },
+    };
+
+    const result = getRuntimePanelDataSource(query.spec.query);
+
+    expect(result).toEqual({
+      type: 'prometheus',
+    });
+  });
+
+  it('should return type-only for different datasource types when no UID provided', () => {
+    const query: PanelQueryKind = {
+      kind: 'PanelQuery',
+      spec: {
+        refId: 'A',
+        hidden: false,
+        query: {
+          kind: 'DataQuery',
+          version: defaultDataQueryKind().version,
+          group: 'loki',
+          spec: {},
+        },
+      },
+    };
+
+    const result = getRuntimePanelDataSource(query.spec.query);
+
+    expect(result).toEqual({
+      type: 'loki',
+    });
+  });
+
+  it('should return type-only even for unknown datasource types', () => {
+    const query: PanelQueryKind = {
+      kind: 'PanelQuery',
+      spec: {
+        refId: 'A',
+        hidden: false,
+        query: {
+          kind: 'DataQuery',
+          version: defaultDataQueryKind().version,
+          group: 'unknown-type',
+          spec: {},
+        },
+      },
+    };
+
+    const result = getRuntimePanelDataSource(query.spec.query);
+
+    expect(result).toEqual({
+      type: 'unknown-type',
+    });
+  });
+
+  it('should return type-only when datasource name is empty string', () => {
+    const query: PanelQueryKind = {
+      kind: 'PanelQuery',
+      spec: {
+        refId: 'A',
+        hidden: false,
+        query: {
+          kind: 'DataQuery',
+          version: defaultDataQueryKind().version,
+          group: 'prometheus',
+          datasource: {
+            name: '',
+          },
+          spec: {},
+        },
+      },
+    };
+
+    const result = getRuntimePanelDataSource(query.spec.query);
+
+    expect(result).toEqual({
+      type: 'prometheus',
+    });
+  });
+
+  it('should return undefined when neither group nor datasource is provided', () => {
+    const query: PanelQueryKind = {
+      kind: 'PanelQuery',
+      spec: {
+        refId: 'A',
+        hidden: false,
+        query: {
+          kind: 'DataQuery',
+          version: defaultDataQueryKind().version,
+          group: '',
+          spec: {},
+        },
+      },
+    };
+
+    const result = getRuntimePanelDataSource(query.spec.query);
+
+    expect(result).toBeUndefined();
+  });
+});
+
+describe('getPanelDataSource', () => {
+  const createPanelWithQueries = (queries: PanelQueryKind[]): PanelKind => ({
+    kind: 'Panel',
+    spec: {
+      ...defaultPanelSpec(),
+      id: 1,
+      title: 'Test Panel',
+      data: {
+        kind: 'QueryGroup',
+        spec: {
+          queries,
+          queryOptions: {},
+          transformations: [],
+        },
+      },
+    },
+  });
+
+  const createQuery = (datasourceName: string, group: string, refId = 'A'): PanelQueryKind => ({
+    kind: 'PanelQuery',
+    spec: {
+      refId,
+      hidden: false,
+      query: {
+        kind: 'DataQuery',
+        version: defaultDataQueryKind().version,
+        group,
+        datasource: {
+          name: datasourceName,
+        },
+        spec: {},
+      },
+    },
+  });
+
+  const createQueryWithoutDatasourceName = (group: string, refId = 'A'): PanelQueryKind => ({
+    kind: 'PanelQuery',
+    spec: {
+      refId,
+      hidden: false,
+      query: {
+        kind: 'DataQuery',
+        version: defaultDataQueryKind().version,
+        group,
+        spec: {},
+      },
+    },
+  });
+
+  it('should return undefined when panel has no queries', () => {
+    const panel = createPanelWithQueries([]);
+
+    const result = getPanelDataSource(panel);
+
+    expect(result).toBeUndefined();
+  });
+
+  it('should return undefined for a single query with specific datasource (not mixed)', () => {
+    const panel = createPanelWithQueries([createQuery('prometheus-uid', 'prometheus')]);
+
+    const result = getPanelDataSource(panel);
+
+    expect(result).toBeUndefined();
+  });
+
+  it('should return undefined for multiple queries with the same datasource', () => {
+    const panel = createPanelWithQueries([
+      createQuery('prometheus-uid', 'prometheus', 'A'),
+      createQuery('prometheus-uid', 'prometheus', 'B'),
+      createQuery('prometheus-uid', 'prometheus', 'C'),
+    ]);
+
+    const result = getPanelDataSource(panel);
+
+    expect(result).toBeUndefined();
+  });
+
+  it('should return mixed datasource when queries use different datasource UIDs', () => {
+    const panel = createPanelWithQueries([
+      createQuery('prometheus-uid', 'prometheus', 'A'),
+      createQuery('loki-uid', 'loki', 'B'),
+    ]);
+
+    const result = getPanelDataSource(panel);
+
+    expect(result).toEqual({ type: 'mixed', uid: MIXED_DATASOURCE_NAME });
+  });
+
+  it('should return mixed datasource when queries use different datasource types', () => {
+    const panel = createPanelWithQueries([
+      createQuery('ds-uid', 'prometheus', 'A'),
+      createQuery('ds-uid', 'loki', 'B'),
+    ]);
+
+    const result = getPanelDataSource(panel);
+
+    expect(result).toEqual({ type: 'mixed', uid: MIXED_DATASOURCE_NAME });
+  });
+
+  it('should return mixed datasource when multiple queries use Dashboard datasource', () => {
+    const panel = createPanelWithQueries([
+      createQuery(SHARED_DASHBOARD_QUERY, 'datasource', 'A'),
+      createQuery(SHARED_DASHBOARD_QUERY, 'datasource', 'B'),
+      createQuery(SHARED_DASHBOARD_QUERY, 'datasource', 'C'),
+    ]);
+
+    const result = getPanelDataSource(panel);
+
+    expect(result).toEqual({ type: 'mixed', uid: MIXED_DATASOURCE_NAME });
+  });
+
+  it('should return Dashboard datasource when single query uses Dashboard datasource', () => {
+    const panel = createPanelWithQueries([createQuery(SHARED_DASHBOARD_QUERY, 'datasource')]);
+
+    const result = getPanelDataSource(panel);
+
+    expect(result).toEqual({ type: 'datasource', uid: SHARED_DASHBOARD_QUERY });
+  });
+
+  it('should return mixed when Dashboard datasource is mixed with other datasources', () => {
+    const panel = createPanelWithQueries([
+      createQuery(SHARED_DASHBOARD_QUERY, 'datasource', 'A'),
+      createQuery('prometheus-uid', 'prometheus', 'B'),
+    ]);
+
+    const result = getPanelDataSource(panel);
+
+    expect(result).toEqual({ type: 'mixed', uid: MIXED_DATASOURCE_NAME });
+  });
+
+  it('should return undefined when queries have no explicit datasource name but same type', () => {
+    const panel = createPanelWithQueries([
+      createQueryWithoutDatasourceName('prometheus', 'A'),
+      createQueryWithoutDatasourceName('prometheus', 'B'),
+    ]);
+
+    const result = getPanelDataSource(panel);
+
+    expect(result).toBeUndefined();
+  });
+
+  it('should return mixed when queries have no explicit datasource name but different types', () => {
+    const panel = createPanelWithQueries([
+      createQueryWithoutDatasourceName('prometheus', 'A'),
+      createQueryWithoutDatasourceName('loki', 'B'),
+    ]);
+
+    const result = getPanelDataSource(panel);
+
+    expect(result).toEqual({ type: 'mixed', uid: MIXED_DATASOURCE_NAME });
+  });
+});
+
+describe('ensureUniqueRefIds', () => {
+  const createQuery = (refId: string): PanelQueryKind => ({
+    kind: 'PanelQuery',
+    spec: {
+      refId,
+      hidden: false,
+      query: {
+        kind: 'DataQuery',
+        version: defaultDataQueryKind().version,
+        group: 'prometheus',
+        spec: {},
+      },
+    },
+  });
+
+  it('should assign unique refIds to queries without refIds', () => {
+    const queries: PanelQueryKind[] = [createQuery(''), createQuery(''), createQuery('')];
+
+    const result = ensureUniqueRefIds(queries);
+
+    expect(result[0].spec.refId).toBe('A');
+    expect(result[1].spec.refId).toBe('B');
+    expect(result[2].spec.refId).toBe('C');
+  });
+
+  it('should preserve existing refIds and fill gaps', () => {
+    const queries: PanelQueryKind[] = [createQuery('A'), createQuery(''), createQuery('D'), createQuery('')];
+
+    const result = ensureUniqueRefIds(queries);
+
+    expect(result[0].spec.refId).toBe('A');
+    expect(result[1].spec.refId).toBe('B');
+    expect(result[2].spec.refId).toBe('D');
+    expect(result[3].spec.refId).toBe('C');
+  });
+
+  it('should handle all queries having existing refIds', () => {
+    const queries: PanelQueryKind[] = [createQuery('A'), createQuery('B'), createQuery('C')];
+
+    const result = ensureUniqueRefIds(queries);
+
+    expect(result[0].spec.refId).toBe('A');
+    expect(result[1].spec.refId).toBe('B');
+    expect(result[2].spec.refId).toBe('C');
+  });
+
+  it('should only modify queries without refIds', () => {
+    const queries: PanelQueryKind[] = [createQuery('A'), createQuery(''), createQuery('C')];
+
+    const result = ensureUniqueRefIds(queries);
+
+    // Existing refIds should be preserved
+    expect(result[0].spec.refId).toBe('A');
+    expect(result[2].spec.refId).toBe('C');
+    // Missing refId should be assigned
+    expect(result[1].spec.refId).toBe('B');
+  });
+
+  it('should handle empty array', () => {
+    const result = ensureUniqueRefIds([]);
+
+    expect(result).toEqual([]);
+  });
+
+  it('should handle single query without refId', () => {
+    const queries: PanelQueryKind[] = [createQuery('')];
+
+    const result = ensureUniqueRefIds(queries);
+
+    expect(result[0].spec.refId).toBe('A');
+  });
+});
+
+describe('buildVizPanel', () => {
+  // Pass title='' to test hoverHeader behavior (no title); omit to use the defaultPanelSpec title.
+  function buildPanelWithQueryOptions(queryOptions: Partial<QueryOptionsSpec>, title?: string): PanelKind {
+    const base = defaultPanelSpec();
+    return {
+      kind: 'Panel',
+      spec: {
+        ...base,
+        ...(title !== undefined ? { title } : {}),
+        data: {
+          kind: 'QueryGroup',
+          spec: {
+            ...base.data.spec,
+            queryOptions: { ...base.data.spec.queryOptions, ...queryOptions },
+          },
+        },
+      },
+    };
+  }
+
+  function getPanelTimeRange(panel: PanelKind): PanelTimeRange {
+    const viz = buildVizPanel(panel);
+    if (!(viz.state.$timeRange instanceof PanelTimeRange)) {
+      throw new Error('$timeRange must be PanelTimeRange');
+    }
+    return viz.state.$timeRange;
+  }
+
+  it.each([
+    ['timeCompare', 'compareWith', '1d'],
+    ['timeFrom', 'timeFrom', '2h'],
+    ['timeShift', 'timeShift', '1h'],
+  ] as const)('maps queryOptions.%s to PanelTimeRange %s', (queryOptionsField, stateField, value) => {
+    const panelTime = getPanelTimeRange(buildPanelWithQueryOptions({ [queryOptionsField]: value }));
+
+    expect(panelTime.state[stateField]).toBe(value);
+  });
+
+  it('carries hideTimeOverride when another time field triggers PanelTimeRange creation', () => {
+    const panelTime = getPanelTimeRange(buildPanelWithQueryOptions({ timeFrom: '2h', hideTimeOverride: true }));
+
+    expect(panelTime.state.hideTimeOverride).toBe(true);
+  });
+
+  it('maps all four time fields when set together', () => {
+    const panelTime = getPanelTimeRange(
+      buildPanelWithQueryOptions({
+        timeFrom: '2h',
+        timeShift: '1h',
+        hideTimeOverride: true,
+        timeCompare: '1d',
+      })
+    );
+
+    expect(panelTime.state).toMatchObject({
+      timeFrom: '2h',
+      timeShift: '1h',
+      hideTimeOverride: true,
+      compareWith: '1d',
+    });
+  });
+
+  it('preserves timeCompare through v2 save and load', () => {
+    const panel = new VizPanel({
+      key: 'panel-1',
+      pluginId: 'timeseries',
+      title: 'Test',
+      $timeRange: new PanelTimeRange({ compareWith: '1w' }),
+    });
+
+    const saved = vizPanelToSchemaV2(panel, undefined, false);
+    expect(saved.kind).toBe('Panel');
+
+    const panelKind = saved as PanelKind;
+    expect(panelKind.spec.data.spec.queryOptions.timeCompare).toBe('1w');
+
+    const reloaded = getPanelTimeRange(panelKind);
+    expect(reloaded.state.compareWith).toBe('1w');
+  });
+
+  it('does not create $timeRange when only hideTimeOverride is set', () => {
+    // hideTimeOverride alone is not one of the three trigger fields (timeFrom/timeShift/timeCompare).
+    const viz = buildVizPanel(buildPanelWithQueryOptions({ hideTimeOverride: true }));
+
+    expect(viz.state.$timeRange).toBeUndefined();
+  });
+
+  it('does not create $timeRange when no time fields are set', () => {
+    const viz = buildVizPanel(buildPanelWithQueryOptions({}));
+
+    expect(viz.state.$timeRange).toBeUndefined();
+  });
+
+  describe('hoverHeader interaction with time range', () => {
+    // hoverHeader is shown only when there's no title AND no visible time override.
+    // timeOverrideShown = (timeFrom || timeShift || timeCompare) && !hideTimeOverride.
+
+    it('shows hoverHeader when there is no title and no time fields', () => {
+      const viz = buildVizPanel(buildPanelWithQueryOptions({}, ''));
+
+      expect(viz.state.hoverHeader).toBe(true);
+    });
+
+    it('hides hoverHeader when timeFrom is visible (no hideTimeOverride)', () => {
+      const viz = buildVizPanel(buildPanelWithQueryOptions({ timeFrom: '2h' }, ''));
+
+      expect(viz.state.hoverHeader).toBe(false);
+    });
+
+    it('hides hoverHeader when timeShift is visible', () => {
+      const viz = buildVizPanel(buildPanelWithQueryOptions({ timeShift: '1h' }, ''));
+
+      expect(viz.state.hoverHeader).toBe(false);
+    });
+
+    it('shows hoverHeader when timeFrom is set but hideTimeOverride suppresses it', () => {
+      const viz = buildVizPanel(buildPanelWithQueryOptions({ timeFrom: '2h', hideTimeOverride: true }, ''));
+
+      expect(viz.state.hoverHeader).toBe(true);
+    });
+
+    it('hides hoverHeader when only timeCompare is set', () => {
+      const viz = buildVizPanel(buildPanelWithQueryOptions({ timeCompare: '1d' }, ''));
+
+      expect(viz.state.hoverHeader).toBe(false);
+    });
+
+    it('hides hoverHeader when the panel has a title, regardless of time fields', () => {
+      const viz = buildVizPanel(buildPanelWithQueryOptions({ timeFrom: '2h', hideTimeOverride: true }, 'My Panel'));
+
+      expect(viz.state.hoverHeader).toBe(false);
+    });
+  });
+
+  describe('withoutQueries (plan placeholders)', () => {
+    // A 'timeseries' sample always sets legend.showLegend: false and infers a unit from the
+    // title (see planningSampleData.ts). Picking planned values that disagree with both makes
+    // any leak from the sample into the panel state visible in the assertions below.
+    function buildPlannedPanel(
+      options: Record<string, unknown>,
+      fieldConfig: FieldConfigSource,
+      group = 'timeseries'
+    ): PanelKind {
+      const base = defaultPanelSpec();
+      return {
+        kind: 'Panel',
+        spec: {
+          ...base,
+          title: 'p99 latency',
+          vizConfig: {
+            ...base.vizConfig,
+            group,
+            spec: { options, fieldConfig },
+          },
+        },
+      };
+    }
+
+    it('keeps the planned spec options/fieldConfig instead of the sample defaults', () => {
+      const panel = buildPlannedPanel(
+        { legend: { showLegend: true } },
+        { ...defaultFieldConfigSource(), defaults: { ...defaultFieldConfigSource().defaults, unit: 'bytes' } }
+      );
+
+      const viz = buildVizPanel(panel, undefined, { withoutQueries: true });
+
+      expect(viz.state.options).toEqual({ legend: { showLegend: true } });
+      expect(viz.state.fieldConfig.defaults.unit).toBe('bytes');
+    });
+
+    it.each([false, true])('adds the placeholder badge without a data provider (has queries: %s)', (hasQueries) => {
+      const panel = buildPlannedPanel(
+        { legend: { showLegend: true } },
+        { ...defaultFieldConfigSource(), defaults: { ...defaultFieldConfigSource().defaults, unit: 'bytes' } }
+      );
+      panel.spec.data.spec.queries = hasQueries ? [defaultPanelQueryKind()] : [];
+
+      const viz = buildVizPanel(panel, undefined, { withoutQueries: true });
+
+      const titleItems = viz.state.titleItems;
+      if (!Array.isArray(titleItems)) {
+        throw new Error('Expected panel title items to be an array');
+      }
+      expect(titleItems.filter((item) => item instanceof PlanPlaceholderBadge)).toHaveLength(1);
+      expect(viz.state.$data).toBeUndefined();
+    });
+
+    it('keeps planned text-panel content instead of the sample placeholder note', () => {
+      // getPlanningPanelData's 'text' branch (planningSampleData.ts) returns { mode: 'markdown',
+      // content: '_Notes for this section._' } as its sample options. buildVizPanelState must
+      // preserve the spec's own options/fieldConfig, or this sample would clobber a planned
+      // text panel's real markdown. Samples now belong to RENDER_PLAN, not the shared serializer.
+      const panel = buildPlannedPanel(
+        { mode: 'markdown', content: 'Real planned note' },
+        defaultFieldConfigSource(),
+        'text'
+      );
+
+      const viz = buildVizPanel(panel, undefined, { withoutQueries: true });
+
+      expect(viz.state.options).toEqual({ mode: 'markdown', content: 'Real planned note' });
+    });
+  });
+});
+
+describe('empty panel query defaults', () => {
+  afterEach(() => setPanelPluginMetas({}));
+
+  it.each([true, false, undefined])('honors skipDefaultQuery=%s through a v2 round trip', (skipDefaultQuery) => {
+    setPanelPluginMetas({ custom: { skipDefaultQuery } as PanelPluginMeta });
+    const panel: PanelKind = { kind: 'Panel', spec: defaultPanelSpec() };
+    panel.spec.vizConfig.group = 'custom';
+    panel.spec.data.spec.queries = [];
+    const loaded = buildVizPanel(panel);
+    expect(getQueryRunnerFor(loaded)?.state.queries ?? []).toEqual(
+      skipDefaultQuery ? [] : [{ refId: 'A', hide: false }]
+    );
+    if (skipDefaultQuery) {
+      expect(getQueryRunnerFor(loaded)?.isDataReadyToDisplay()).toBe(true);
+      const saved = vizPanelToSchemaV2(loaded, undefined, false) as PanelKind;
+      expect(saved.spec.data.spec.queries).toEqual([]);
+      expect(getQueryRunnerFor(buildVizPanel(saved))?.state.queries ?? []).toEqual([]);
+    }
+  });
+
+  it('preserves explicit queries for opted-in plugins', () => {
+    setPanelPluginMetas({ custom: { skipDefaultQuery: true } as PanelPluginMeta });
+    const panel: PanelKind = { kind: 'Panel', spec: defaultPanelSpec() };
+    panel.spec.vizConfig.group = 'custom';
+    panel.spec.data.spec.queries = [defaultPanelQueryKind()];
+    expect(getQueryRunnerFor(buildVizPanel(panel))?.state.queries).toEqual([{ refId: 'A', hide: false }]);
+  });
+
+  it('honors skipDefaultQuery through a panel plugin alias', () => {
+    setPanelPluginMetas({ custom: { aliasIDs: ['custom-alias'], skipDefaultQuery: true } as PanelPluginMeta });
+    const panel: PanelKind = { kind: 'Panel', spec: defaultPanelSpec() };
+    panel.spec.vizConfig.group = 'custom-alias';
+    panel.spec.data.spec.queries = [];
+
+    const queryRunner = getQueryRunnerFor(buildVizPanel(panel));
+
+    expect(queryRunner?.state.queries).toEqual([]);
+    expect(queryRunner?.isDataReadyToDisplay()).toBe(true);
+  });
+});
+
+describe('legacy panel query defaults', () => {
+  afterEach(() => setPanelPluginMetas({}));
+
+  it.each([[], undefined])('preserves empty or absent queries for opted-in panels', (targets) => {
+    setPanelPluginMetas({ custom: { skipDefaultQuery: true } as PanelPluginMeta });
+    const model = new PanelModel({ type: 'custom', targets, transformations: [{ id: 'reduce', options: {} }] });
+    expect(model.targets).toEqual([]);
+    const viz = new VizPanel({ key: 'panel-1', pluginId: 'custom', $data: createPanelDataProvider(model) });
+    expect(getQueryRunnerFor(viz)?.isDataReadyToDisplay()).toBe(true);
+    const saved = vizPanelToPanel(viz);
+    expect(saved.targets).toEqual([]);
+    expect(saved.transformations).toEqual([{ id: 'reduce', options: {} }]);
+    expect(new PanelModel(saved).targets).toEqual([]);
+  });
+
+  it('creates an empty query runner when the panel uses a plugin alias', () => {
+    setPanelPluginMetas({ custom: { aliasIDs: ['custom-alias'], skipDefaultQuery: true } as PanelPluginMeta });
+    const model = new PanelModel({ type: 'custom-alias', targets: [] });
+    const viz = new VizPanel({ key: 'panel-1', pluginId: 'custom-alias', $data: createPanelDataProvider(model) });
+
+    expect(getQueryRunnerFor(viz)?.state.queries).toEqual([]);
+    expect(getQueryRunnerFor(viz)?.isDataReadyToDisplay()).toBe(true);
+  });
+});

@@ -1,0 +1,251 @@
+import { catchError, combineLatest, defer, forkJoin, from, map, type Observable, of, switchMap } from 'rxjs';
+
+import {
+  PluginExtensionTypes,
+  type PluginExtension,
+  type PluginExtensionComponent,
+  type PluginExtensionFunction,
+} from '@grafana/data';
+import {
+  type GetObservablePluginLinks,
+  type GetObservablePluginComponents,
+  type GetObservablePluginFunctions,
+  type GetObservablePluginFunctionsOptions,
+} from '@grafana/runtime/internal';
+
+import { loadDependentAppPlugins } from './loadDependentAppPlugins';
+import { log } from './logs/log';
+import { addedFunctionsRegistrySlice, type AddedFunctionsRegistryItem } from './registry/AddedFunctionsRegistry';
+import { getPluginExtensionRegistries } from './registry/setup';
+import { type PluginExtensionRegistries } from './registry/types';
+import { type GetExtensions, type GetExtensionsOptions } from './types';
+import {
+  addedLinkToExtensionLink,
+  getReadOnlyProxy,
+  generateExtensionId,
+  getExtensionPointPluginDependencies,
+  wrapWithPluginContext,
+  getLinkExtensionOverrides,
+} from './utils';
+
+/**
+ * Loads the dependent app plugins for an extension point and fetches the extension registries, in parallel.
+ * Shared by all the `getObservablePlugin*` functions below, so each gets the registries only once the
+ * plugins that could be contributing to the extension point have had a chance to register.
+ *
+ * Wrapped in `defer()` so that neither step runs until something actually subscribes, matching normal
+ * Observable semantics.
+ */
+function loadPluginsAndRegistries(extensionPointId: string): Observable<PluginExtensionRegistries> {
+  return defer(() => {
+    const pluginsLoaded = from(loadDependentAppPlugins(extensionPointId, getExtensionPointPluginDependencies)).pipe(
+      catchError((error) => {
+        const labels = { extensionPointId };
+        if (error instanceof Error) {
+          log.error(error.message, { ...labels, stack: error.stack ?? '', message: error.message });
+        } else {
+          log.error(String(error), labels);
+        }
+        return of(undefined);
+      })
+    );
+
+    // getPluginExtensionRegistries() needs no catchError of its own: it already catches its own
+    // initialization errors and falls back to empty registries (see registry/setup.ts).
+    return forkJoin([from(getPluginExtensionRegistries()), pluginsLoaded]);
+  }).pipe(map(([registries]) => registries));
+}
+
+/**
+ * Returns an observable that emits plugin extensions whenever the core extensions registries change.
+ * The observable will emit the initial state of the extensions and then emit again whenever
+ * either the added components registry or the added links registry changes.
+ *
+ * @param options - The options for getting plugin extensions
+ * @returns An Observable that emits the plugin extensions for the given extension point any time the registries change
+ */
+
+export const getObservablePluginExtensions = (
+  options: Omit<GetExtensionsOptions, 'addedComponentsRegistry' | 'addedLinksRegistry'>
+): Observable<ReturnType<GetExtensions>> => {
+  const { extensionPointId } = options;
+
+  return loadPluginsAndRegistries(extensionPointId).pipe(
+    switchMap((registries) =>
+      combineLatest([
+        registries.addedComponentsRegistry.asObservableSlice((state) => state[extensionPointId]),
+        registries.addedLinksRegistry.asObservableSlice((state) => state[extensionPointId]),
+      ]).pipe(
+        map(([components, links]) =>
+          getPluginExtensions({
+            ...options,
+            addedComponentsRegistry: {
+              [extensionPointId]: components,
+            },
+            addedLinksRegistry: {
+              [extensionPointId]: links,
+            },
+          })
+        )
+      )
+    )
+  );
+};
+
+export const getObservablePluginLinks: GetObservablePluginLinks = (options) => {
+  return getObservablePluginExtensions(options).pipe(
+    map((value) => value.extensions.filter((extension) => extension.type === PluginExtensionTypes.link))
+  );
+};
+
+export const getObservablePluginComponents: GetObservablePluginComponents = (options) => {
+  return getObservablePluginExtensions(options).pipe(
+    map((value) => value.extensions.filter((extension) => extension.type === PluginExtensionTypes.component))
+  );
+};
+
+// Near-duplicate of the type-enforcing loop in `usePluginFunctions`
+const toFunctionExtensions = <Signature>(
+  registryItems: Array<AddedFunctionsRegistryItem<Signature>>,
+  extensionPointId: string,
+  limitPerPlugin?: number
+): Array<PluginExtensionFunction<Signature>> => {
+  const functions: Array<PluginExtensionFunction<Signature>> = [];
+  const extensionsByPlugin: Record<string, number> = {};
+
+  for (const { pluginId, title, description, fn } of registryItems) {
+    // Only limit if the `limitPerPlugin` is set
+    if (limitPerPlugin && extensionsByPlugin[pluginId] >= limitPerPlugin) {
+      continue;
+    }
+
+    if (extensionsByPlugin[pluginId] === undefined) {
+      extensionsByPlugin[pluginId] = 0;
+    }
+
+    functions.push({
+      id: generateExtensionId(pluginId, extensionPointId, title),
+      type: PluginExtensionTypes.function,
+      pluginId,
+      title,
+      description: description ?? '',
+      fn,
+    });
+    extensionsByPlugin[pluginId] += 1;
+  }
+
+  return functions;
+};
+
+// `options` needs an explicit type: a generic arrow doesn't get it contextually from the annotation.
+export const getObservablePluginFunctions: GetObservablePluginFunctions = <Signature>(
+  options: GetObservablePluginFunctionsOptions
+) => {
+  const { extensionPointId, limitPerPlugin } = options;
+
+  return loadPluginsAndRegistries(extensionPointId).pipe(
+    switchMap((registries) =>
+      addedFunctionsRegistrySlice<Signature>(registries.addedFunctionsRegistry, extensionPointId)
+    ),
+    map((registryItems) => toFunctionExtensions(registryItems ?? [], extensionPointId, limitPerPlugin))
+  );
+};
+
+// Returns with a list of plugin extensions for the given extension point
+export const getPluginExtensions: GetExtensions = ({
+  context,
+  extensionPointId,
+  limitPerPlugin,
+  addedLinksRegistry,
+  addedComponentsRegistry,
+}) => {
+  const frozenContext = context ? getReadOnlyProxy(context) : {};
+  // We don't return the extensions separated by type, because in that case it would be much harder to define a sort-order for them.
+  const extensions: PluginExtension[] = [];
+  const extensionsByPlugin: Record<string, number> = {};
+
+  for (const addedLink of addedLinksRegistry?.[extensionPointId] ?? []) {
+    try {
+      const { pluginId } = addedLink;
+      // Only limit if the `limitPerPlugin` is set
+      if (limitPerPlugin && extensionsByPlugin[pluginId] >= limitPerPlugin) {
+        continue;
+      }
+
+      if (extensionsByPlugin[pluginId] === undefined) {
+        extensionsByPlugin[pluginId] = 0;
+      }
+
+      const linkLog = log.child({
+        pluginId,
+        extensionPointId,
+        path: addedLink.path ?? '',
+        title: addedLink.title,
+        description: addedLink.description ?? '',
+        onClick: typeof addedLink.onClick,
+      });
+      // Run the configure() function with the current context, and apply the ovverides
+      const overrides = getLinkExtensionOverrides(pluginId, addedLink, linkLog, frozenContext);
+
+      // configure() returned an `undefined` -> hide the extension
+      if (addedLink.configure && overrides === undefined) {
+        continue;
+      }
+
+      const extension = addedLinkToExtensionLink(
+        pluginId,
+        extensionPointId,
+        addedLink,
+        overrides,
+        linkLog,
+        frozenContext
+      );
+      extensions.push(extension);
+      extensionsByPlugin[pluginId] += 1;
+    } catch (error) {
+      if (error instanceof Error) {
+        log.error(error.message, {
+          stack: error.stack ?? '',
+          message: error.message,
+        });
+      }
+    }
+  }
+
+  const addedComponents = addedComponentsRegistry?.[extensionPointId] ?? [];
+  for (const addedComponent of addedComponents) {
+    // Only limit if the `limitPerPlugin` is set
+    if (limitPerPlugin && extensionsByPlugin[addedComponent.pluginId] >= limitPerPlugin) {
+      continue;
+    }
+
+    if (extensionsByPlugin[addedComponent.pluginId] === undefined) {
+      extensionsByPlugin[addedComponent.pluginId] = 0;
+    }
+
+    const componentLog = log.child({
+      title: addedComponent.title,
+      description: addedComponent.description ?? '',
+      pluginId: addedComponent.pluginId,
+    });
+
+    const extension: PluginExtensionComponent = {
+      id: generateExtensionId(addedComponent.pluginId, extensionPointId, addedComponent.title),
+      type: PluginExtensionTypes.component,
+      pluginId: addedComponent.pluginId,
+      title: addedComponent.title,
+      description: addedComponent.description ?? '',
+      component: wrapWithPluginContext({
+        pluginId: addedComponent.pluginId,
+        extensionTitle: addedComponent.title,
+        Component: addedComponent.component,
+        log: componentLog,
+      }),
+    };
+
+    extensions.push(extension);
+    extensionsByPlugin[addedComponent.pluginId] += 1;
+  }
+
+  return { extensions };
+};

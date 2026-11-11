@@ -1,0 +1,111 @@
+{
+  "result_format": "FIELD_VALUES",
+  "fields": [
+    {
+      "name": "title",
+      "type": "STRING"
+    }
+  ],
+  "rows": [
+    {
+      "key": {
+        "namespace": "ns",
+        "group": "dashboard.grafana.app",
+        "resource": "dashboards",
+        "name": "aaa"
+      },
+      "values": [
+        {
+          "string_values": [
+            "aaa (dash)"
+          ]
+        }
+      ],
+      "sort_fields": [
+        "aaa (dash)",
+        "aaa",
+        "ns/dashboard.grafana.app/dashboards/aaa"
+      ]
+    },
+    {
+      "key": {
+        "namespace": "ns",
+        "group": "dashboard.grafana.app",
+        "resource": "dashboards",
+        "name": "bbb"
+      },
+      "values": [
+        {
+          "string_values": [
+            "bbb (dash)"
+          ]
+        }
+      ],
+      "sort_fields": [
+        "bbb (dash)",
+        "bbb",
+        "ns/dashboard.grafana.app/dashboards/bbb"
+      ]
+    },
+    {
+      "key": {
+        "namespace": "ns",
+        "group": "dashboard.grafana.app",
+        "resource": "dashboards",
+        "name": "ccc"
+      },
+      "values": [
+        {
+          "string_values": [
+            "ccc (dash)"
+          ]
+        }
+      ],
+      "sort_fields": [
+        "ccc (dash)",
+        "ccc",
+        "ns/dashboard.grafana.app/dashboards/ccc"
+      ]
+    },
+    {
+      "key": {
+        "namespace": "ns",
+        "group": "folder.grafana.app",
+        "resource": "folders",
+        "name": "yyy"
+      },
+      "values": [
+        {
+          "string_values": [
+            "yyy (folder)"
+          ]
+        }
+      ],
+      "sort_fields": [
+        "yyy (folder)",
+        "yyy",
+        "ns/folder.grafana.app/folders/yyy"
+      ]
+    },
+    {
+      "key": {
+        "namespace": "ns",
+        "group": "folder.grafana.app",
+        "resource": "folders",
+        "name": "zzz"
+      },
+      "values": [
+        {
+          "string_values": [
+            "zzz (folder)"
+          ]
+        }
+      ],
+      "sort_fields": [
+        "zzz (folder)",
+        "zzz",
+        "ns/folder.grafana.app/folders/zzz"
+      ]
+    }
+  ]
+}

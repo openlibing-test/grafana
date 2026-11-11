@@ -1,0 +1,679 @@
+package schedule
+
+import (
+	"cmp"
+	"encoding/json"
+	"math/rand"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+	"uuid"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/grafana/grafana/pkg/expr"
+	"github.com/grafana/grafana/pkg/services/ngalert/models"
+)
+
+func TestSchedulableAlertRulesRegistry(t *testing.T) {
+	r := alertRulesRegistry{rules: make(map[models.AlertRuleKey]*models.AlertRule)}
+	rules, folders := r.all()
+	assert.Len(t, rules, 0)
+	assert.Len(t, folders, 0)
+
+	expectedFolders := map[models.FolderKey]string{{OrgID: 1, UID: "test-uid"}: "test-title"}
+	// replace all rules in the registry with foo
+	r.set([]*models.AlertRule{{OrgID: 1, UID: "foo", Version: 1}}, expectedFolders, nil)
+	rules, folders = r.all()
+	assert.Len(t, rules, 1)
+	assert.Equal(t, expectedFolders, folders)
+
+	foo := r.get(models.AlertRuleKey{OrgID: 1, UID: "foo"})
+	require.NotNil(t, foo)
+	assert.Equal(t, models.AlertRule{OrgID: 1, UID: "foo", Version: 1}, *foo)
+
+	// update foo to a newer version
+	r.update(&models.AlertRule{OrgID: 1, UID: "foo", Version: 2})
+	rules, _ = r.all()
+	assert.Len(t, rules, 1)
+	foo = r.get(models.AlertRuleKey{OrgID: 1, UID: "foo"})
+	require.NotNil(t, foo)
+	assert.Equal(t, models.AlertRule{OrgID: 1, UID: "foo", Version: 2}, *foo)
+
+	// update bar which does not exist in the registry
+	r.update(&models.AlertRule{OrgID: 1, UID: "bar", Version: 1})
+	rules, _ = r.all()
+	assert.Len(t, rules, 2)
+	foo = r.get(models.AlertRuleKey{OrgID: 1, UID: "foo"})
+	require.NotNil(t, foo)
+	assert.Equal(t, models.AlertRule{OrgID: 1, UID: "foo", Version: 2}, *foo)
+	bar := r.get(models.AlertRuleKey{OrgID: 1, UID: "bar"})
+	require.NotNil(t, foo)
+	assert.Equal(t, models.AlertRule{OrgID: 1, UID: "bar", Version: 1}, *bar)
+
+	// replace all rules in the registry with baz
+	r.set([]*models.AlertRule{{OrgID: 1, UID: "baz", Version: 1}}, nil, nil)
+	rules, folders = r.all()
+	assert.Len(t, rules, 1)
+	assert.Nil(t, folders)
+	baz := r.get(models.AlertRuleKey{OrgID: 1, UID: "baz"})
+	require.NotNil(t, baz)
+	assert.Equal(t, models.AlertRule{OrgID: 1, UID: "baz", Version: 1}, *baz)
+	assert.Nil(t, r.get(models.AlertRuleKey{OrgID: 1, UID: "foo"}))
+	assert.Nil(t, r.get(models.AlertRuleKey{OrgID: 1, UID: "bar"}))
+
+	// delete baz
+	deleted, ok := r.del(models.AlertRuleKey{OrgID: 1, UID: "baz"})
+	assert.True(t, ok)
+	require.NotNil(t, deleted)
+	assert.Equal(t, *deleted, *baz)
+	rules, folders = r.all()
+	assert.Len(t, rules, 0)
+	assert.Len(t, folders, 0)
+	assert.Nil(t, r.get(models.AlertRuleKey{OrgID: 1, UID: "baz"}))
+
+	// baz cannot be deleted twice
+	deleted, ok = r.del(models.AlertRuleKey{OrgID: 1, UID: "baz"})
+	assert.False(t, ok)
+	assert.Nil(t, deleted)
+}
+
+func TestSchedulableAlertRulesRegistry_set(t *testing.T) {
+	gen := models.RuleGen
+	initialRules := gen.GenerateManyRef(100)
+	init := make(map[models.AlertRuleKey]*models.AlertRule, len(initialRules))
+	for _, rule := range initialRules {
+		init[rule.GetKey()] = rule
+	}
+	r := alertRulesRegistry{rules: init}
+	t.Run("should return empty diff if exactly the same rules", func(t *testing.T) {
+		newRules := make([]*models.AlertRule, 0, len(initialRules))
+		for _, rule := range initialRules {
+			newRules = append(newRules, models.CopyRule(rule))
+		}
+		diff := r.set(newRules, map[models.FolderKey]string{}, nil)
+		require.Truef(t, diff.IsEmpty(), "Diff is not empty. Probably we check something else than key + version")
+	})
+	t.Run("should return empty diff if version does not change", func(t *testing.T) {
+		newRules := make([]*models.AlertRule, 0, len(initialRules))
+		// generate random and then override rule key + version
+		randomNew := gen.GenerateManyRef(len(initialRules))
+		for i := range initialRules {
+			rule := randomNew[i]
+			oldRule := initialRules[i]
+			rule.UID = oldRule.UID
+			rule.OrgID = oldRule.OrgID
+			rule.Version = oldRule.Version
+			newRules = append(newRules, rule)
+		}
+
+		diff := r.set(newRules, map[models.FolderKey]string{}, nil)
+		require.Truef(t, diff.IsEmpty(), "Diff is not empty. Probably we check something else than key + version")
+	})
+	t.Run("should return key in diff if version changes", func(t *testing.T) {
+		newRules := make([]*models.AlertRule, 0, len(initialRules))
+		expectedUpdated := map[models.AlertRuleKey]struct{}{}
+		for i, rule := range initialRules {
+			cp := models.CopyRule(rule)
+			if i%2 == 0 {
+				cp.Version++
+				expectedUpdated[cp.GetKey()] = struct{}{}
+			}
+			newRules = append(newRules, cp)
+		}
+		require.NotEmptyf(t, expectedUpdated, "Input parameters have changed. Nothing to assert")
+
+		diff := r.set(newRules, map[models.FolderKey]string{}, nil)
+		require.Falsef(t, diff.IsEmpty(), "Diff is empty but should not be")
+		require.Equal(t, expectedUpdated, diff.updated)
+	})
+}
+
+func TestRuleSequencesNeedUpdate(t *testing.T) {
+	newRegistry := func() alertRulesRegistry {
+		return alertRulesRegistry{rules: make(map[models.AlertRuleKey]*models.AlertRule)}
+	}
+
+	t.Run("empty registry and empty sequences returns false", func(t *testing.T) {
+		r := newRegistry()
+		r.set(nil, nil, []models.SchedulableRuleSequence{})
+		assert.False(t, r.ruleSequencesNeedUpdate(nil))
+		assert.False(t, r.ruleSequencesNeedUpdate([]models.SchedulableRuleSequence{}))
+	})
+
+	t.Run("empty registry with new sequences returns true", func(t *testing.T) {
+		r := newRegistry()
+		r.set(nil, nil, []models.SchedulableRuleSequence{})
+		sequences := []models.SchedulableRuleSequence{
+			{UID: "seq-1", IntervalSeconds: 30},
+		}
+		assert.True(t, r.ruleSequencesNeedUpdate(sequences))
+	})
+
+	t.Run("matching sequences returns false", func(t *testing.T) {
+		r := newRegistry()
+		sequences := []models.SchedulableRuleSequence{
+			{UID: "seq-1", IntervalSeconds: 30},
+			{UID: "seq-2", IntervalSeconds: 60},
+		}
+		r.set(nil, nil, sequences)
+		assert.False(t, r.ruleSequencesNeedUpdate(sequences))
+	})
+
+	t.Run("interval change returns true", func(t *testing.T) {
+		r := newRegistry()
+		r.set(nil, nil, []models.SchedulableRuleSequence{
+			{UID: "seq-1", IntervalSeconds: 30},
+		})
+		sequences := []models.SchedulableRuleSequence{
+			{UID: "seq-1", IntervalSeconds: 60},
+		}
+		assert.True(t, r.ruleSequencesNeedUpdate(sequences))
+	})
+
+	t.Run("sequence added returns true", func(t *testing.T) {
+		r := newRegistry()
+		r.set(nil, nil, []models.SchedulableRuleSequence{
+			{UID: "seq-1", IntervalSeconds: 30},
+		})
+		sequences := []models.SchedulableRuleSequence{
+			{UID: "seq-1", IntervalSeconds: 30},
+			{UID: "seq-2", IntervalSeconds: 60},
+		}
+		assert.True(t, r.ruleSequencesNeedUpdate(sequences))
+	})
+
+	t.Run("sequence removed returns true", func(t *testing.T) {
+		r := newRegistry()
+		r.set(nil, nil, []models.SchedulableRuleSequence{
+			{UID: "seq-1", IntervalSeconds: 30},
+			{UID: "seq-2", IntervalSeconds: 60},
+		})
+		sequences := []models.SchedulableRuleSequence{
+			{UID: "seq-1", IntervalSeconds: 30},
+		}
+		assert.True(t, r.ruleSequencesNeedUpdate(sequences))
+	})
+
+	t.Run("sequence replaced with different UID returns true", func(t *testing.T) {
+		r := newRegistry()
+		r.set(nil, nil, []models.SchedulableRuleSequence{
+			{UID: "seq-1", IntervalSeconds: 30},
+		})
+		sequences := []models.SchedulableRuleSequence{
+			{UID: "seq-new", IntervalSeconds: 30},
+		}
+		assert.True(t, r.ruleSequencesNeedUpdate(sequences))
+	})
+
+	t.Run("nil registry map with empty sequences returns false", func(t *testing.T) {
+		// A fresh registry has a nil fingerprints map. With no sequences,
+		// len(nil) == len([]models.SchedulableRuleSequence{}) == 0, so no update needed.
+		r := newRegistry()
+		assert.False(t, r.ruleSequencesNeedUpdate(nil))
+	})
+
+	t.Run("membership change without interval change returns true", func(t *testing.T) {
+		r := newRegistry()
+		sequences := []models.SchedulableRuleSequence{
+			{
+				UID:               "seq-1",
+				IntervalSeconds:   30,
+				RecordingRuleRefs: []string{"rule-a"},
+				AlertRuleRefs:     []string{"rule-b"},
+			},
+		}
+
+		r.set(nil, nil, sequences)
+		assert.False(t, r.ruleSequencesNeedUpdate(sequences))
+
+		// Change membership: add a new rule ref without changing the interval.
+		changed := []models.SchedulableRuleSequence{
+			{
+				UID:               "seq-1",
+				IntervalSeconds:   30,
+				RecordingRuleRefs: []string{"rule-a", "rule-c"},
+				AlertRuleRefs:     []string{"rule-b"},
+			},
+		}
+		assert.True(t, r.ruleSequencesNeedUpdate(changed), "membership change should be detected even without interval change")
+	})
+
+	t.Run("membership reorder without interval change returns true", func(t *testing.T) {
+		r := newRegistry()
+		sequences := []models.SchedulableRuleSequence{
+			{
+				UID:               "seq-1",
+				IntervalSeconds:   30,
+				RecordingRuleRefs: []string{"rule-a", "rule-b"},
+			},
+		}
+
+		r.set(nil, nil, sequences)
+		assert.False(t, r.ruleSequencesNeedUpdate(sequences))
+
+		// Reorder the refs: this changes evaluation order, so should be detected.
+		reordered := []models.SchedulableRuleSequence{
+			{
+				UID:               "seq-1",
+				IntervalSeconds:   30,
+				RecordingRuleRefs: []string{"rule-b", "rule-a"},
+			},
+		}
+		assert.True(t, r.ruleSequencesNeedUpdate(reordered), "membership reorder should be detected")
+	})
+
+	t.Run("rule moved between recording and alerting refs returns true", func(t *testing.T) {
+		r := newRegistry()
+		sequences := []models.SchedulableRuleSequence{
+			{
+				UID:               "seq-1",
+				IntervalSeconds:   30,
+				RecordingRuleRefs: []string{"rule-a"},
+				AlertRuleRefs:     []string{"rule-b"},
+			},
+		}
+
+		r.set(nil, nil, sequences)
+		assert.False(t, r.ruleSequencesNeedUpdate(sequences))
+
+		// Move rule-a from recording to alerting refs.
+		moved := []models.SchedulableRuleSequence{
+			{
+				UID:             "seq-1",
+				IntervalSeconds: 30,
+				AlertRuleRefs:   []string{"rule-a", "rule-b"},
+			},
+		}
+		assert.True(t, r.ruleSequencesNeedUpdate(moved), "moving a rule between ref types should be detected")
+	})
+
+	t.Run("after set with sequences, matching sequences return false", func(t *testing.T) {
+		r := newRegistry()
+		sequences := []models.SchedulableRuleSequence{
+			{UID: "seq-1", IntervalSeconds: 30},
+			{UID: "seq-2", IntervalSeconds: 60},
+		}
+
+		// Before storing, the registry has no sequence data, so it reports an update is needed.
+		assert.True(t, r.ruleSequencesNeedUpdate(sequences))
+
+		// Store the sequence intervals via set.
+		r.set(nil, nil, sequences)
+
+		// Now the same sequences should not need an update.
+		assert.False(t, r.ruleSequencesNeedUpdate(sequences))
+
+		// A changed interval should still be detected.
+		changed := []models.SchedulableRuleSequence{
+			{UID: "seq-1", IntervalSeconds: 30},
+			{UID: "seq-2", IntervalSeconds: 120},
+		}
+		assert.True(t, r.ruleSequencesNeedUpdate(changed))
+	})
+}
+
+func TestRuleWithFolderFingerprint(t *testing.T) {
+	rule := models.RuleGen.GenerateRef()
+	title := uuid.NewV4().String()
+	f := ruleWithFolder{rule: rule, folderTitle: title}.Fingerprint()
+	t.Run("should calculate a fingerprint", func(t *testing.T) {
+		require.NotEqual(t, 0, uint64(f))
+	})
+	t.Run("mirror copy should have the same fingerprint", func(t *testing.T) {
+		f2 := ruleWithFolder{rule: models.CopyRule(rule), folderTitle: title}.Fingerprint()
+		require.Equal(t, f, f2)
+	})
+	t.Run("order of queries should not affect the fingerprint", func(t *testing.T) {
+		cp := models.CopyRule(rule)
+		rand.Shuffle(len(cp.Data), func(i, j int) {
+			cp.Data[i], cp.Data[j] = cp.Data[j], cp.Data[i]
+		})
+		f2 := ruleWithFolder{rule: cp, folderTitle: title}.Fingerprint()
+		require.Equal(t, f, f2)
+	})
+	t.Run("folder name should be used in fingerprint", func(t *testing.T) {
+		f2 := ruleWithFolder{rule: rule, folderTitle: uuid.NewV4().String()}.Fingerprint()
+		require.NotEqual(t, f, f2)
+	})
+	t.Run("Version, Updated, IntervalSeconds, GUID, Annotations and RuleGroupIndex should be excluded from fingerprint", func(t *testing.T) {
+		cp := models.CopyRule(rule)
+		cp.Version++
+		cp.Updated = cp.Updated.Add(1 * time.Second)
+		cp.IntervalSeconds++
+		cp.Annotations = make(map[string]string)
+		cp.Annotations["test"] = "test"
+		cp.RuleGroupIndex++
+		cp.GUID = uuid.NewV4().String()
+
+		f2 := ruleWithFolder{rule: cp, folderTitle: title}.Fingerprint()
+		require.Equal(t, f, f2)
+	})
+
+	t.Run("fields that cannot change the state cache ID should be excluded from fingerprint", func(t *testing.T) {
+		base := models.CopyRule(rule)
+		base.Record = nil
+		fBase := ruleWithFolder{rule: base, folderTitle: title}.Fingerprint()
+
+		mutations := map[string]func(r *models.AlertRule){
+			"RuleGroup": func(r *models.AlertRule) { r.RuleGroup += "-changed" },
+			"For":       func(r *models.AlertRule) { r.For += time.Minute },
+		}
+		for name, mutate := range mutations {
+			t.Run(name, func(t *testing.T) {
+				cp := models.CopyRule(base)
+				mutate(cp)
+				require.Equal(t, fBase, ruleWithFolder{rule: cp, folderTitle: title}.Fingerprint())
+			})
+		}
+
+		t.Run("Record presence", func(t *testing.T) {
+			cp := models.CopyRule(base)
+			cp.Record = &models.Record{Metric: "metric_a", From: "A"}
+			require.Equal(t, fBase, ruleWithFolder{rule: cp, folderTitle: title}.Fingerprint())
+		})
+
+		t.Run("Record content", func(t *testing.T) {
+			a := models.CopyRule(base)
+			a.Record = &models.Record{Metric: "metric_a", From: "A"}
+			b := models.CopyRule(base)
+			b.Record = &models.Record{Metric: "metric_b", From: "B"}
+			require.Equal(t,
+				ruleWithFolder{rule: a, folderTitle: title}.Fingerprint(),
+				ruleWithFolder{rule: b, folderTitle: title}.Fingerprint(),
+			)
+		})
+	})
+
+	t.Run("NoDataState and ExecErrState should be used in fingerprint", func(t *testing.T) {
+		base := models.CopyRule(rule)
+		base.NoDataState = models.NoData
+		base.ExecErrState = models.ErrorErrState
+		fBase := ruleWithFolder{rule: base, folderTitle: title}.Fingerprint()
+
+		noData := models.CopyRule(base)
+		noData.NoDataState = models.OK
+		require.NotEqual(t, fBase, ruleWithFolder{rule: noData, folderTitle: title}.Fingerprint())
+
+		execErr := models.CopyRule(base)
+		execErr.ExecErrState = models.OkErrState
+		require.NotEqual(t, fBase, ruleWithFolder{rule: execErr, folderTitle: title}.Fingerprint())
+	})
+
+	t.Run("DashboardUID and PanelID should be used in fingerprint", func(t *testing.T) {
+		base := models.CopyRule(rule)
+		base.DashboardUID = new("dashboard")
+		base.PanelID = new(int64(1))
+		fBase := ruleWithFolder{rule: base, folderTitle: title}.Fingerprint()
+
+		dashboard := models.CopyRule(base)
+		dashboard.DashboardUID = new("dashboard-2")
+		require.NotEqual(t, fBase, ruleWithFolder{rule: dashboard, folderTitle: title}.Fingerprint())
+
+		panel := models.CopyRule(base)
+		panel.PanelID = new(int64(2))
+		require.NotEqual(t, fBase, ruleWithFolder{rule: panel, folderTitle: title}.Fingerprint())
+	})
+
+	t.Run("threshold condition is fingerprinted by its referenced var only", func(t *testing.T) {
+		const (
+			gt10 = `{"type":"gt","params":[10]}`
+			gt20 = `{"type":"gt","params":[20]}`
+		)
+		// threshold builds a threshold model with the given conditions array.
+		threshold := func(conditions string) string {
+			return `{"refId":"C","type":"threshold","expression":"B","datasource":{"type":"__expr__","uid":"__expr__"},"conditions":` + conditions + `}`
+		}
+		cond := func(evaluator string) string { return `[{"evaluator":` + evaluator + `}]` }
+		base := threshold(cond(gt10))
+
+		cases := []struct {
+			name      string
+			condition string // rule.Condition, defaults to "C" (the query under test)
+			uid       string // datasource UID of the query under test, defaults to the expression datasource
+			a, b      string
+			equal     bool
+		}{
+			{name: "evaluator change", a: base, b: threshold(cond(gt20)), equal: true},
+			{name: "unloadEvaluator added", a: base, b: threshold(`[{"evaluator":` + gt10 + `,"unloadEvaluator":` + gt20 + `}]`), equal: true},
+			{name: "referenced var (expression) change", a: base, b: strings.Replace(base, `"expression":"B"`, `"expression":"A"`, 1)},
+			{name: "legacy expression datasource UID", uid: expr.OldDatasourceUID, a: base, b: threshold(cond(gt20)), equal: true},
+			{
+				name:      "threshold query that is not the rule's condition is hashed raw",
+				condition: "OTHER",
+				a:         base,
+				b:         threshold(cond(gt20)),
+			},
+			{
+				name: "data source query is hashed raw",
+				uid:  "some-ds",
+				a:    `{"expr":"up"}`,
+				b:    `{"expr":"down"}`,
+			},
+			{
+				// AlertQuery.ThresholdReferenceVar checks the datasource UID first (via IsExpression), so a
+				// non-expression query is never treated as a threshold condition just because its model
+				// happens to have "type":"threshold".
+				name: "data source query with a threshold-shaped model is hashed raw",
+				uid:  "some-ds",
+				a:    base,
+				b:    threshold(cond(gt20)),
+			},
+			{
+				name: "non-threshold condition is hashed raw",
+				a:    `{"refId":"C","type":"math","expression":"$B > 10"}`,
+				b:    `{"refId":"C","type":"math","expression":"$B > 20"}`,
+			},
+			{
+				name: "malformed JSON condition is hashed raw",
+				a:    `{"type":"threshold","conditions":[{"evaluator":`,
+				b:    `{"type":"threshold","conditions":[{"evaluator":1`,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				uid := cmp.Or(tc.uid, expr.DatasourceUID)
+				condition := cmp.Or(tc.condition, "C")
+				fp := func(model string) fingerprint {
+					cp := models.CopyRule(rule)
+					cp.Condition = condition
+					cp.Data = []models.AlertQuery{{RefID: "C", DatasourceUID: uid, Model: json.RawMessage(model)}}
+					return ruleWithFolder{rule: cp, folderTitle: title}.Fingerprint()
+				}
+				fa, fb := fp(tc.a), fp(tc.b)
+				if tc.equal {
+					require.Equal(t, fa, fb)
+				} else {
+					require.NotEqual(t, fa, fb)
+				}
+			})
+		}
+
+		// Sanity check that other queries are still hashed normally when the condition query is a
+		// threshold expression: only the condition's own model is replaced, nothing else is skipped.
+		t.Run("other queries are still hashed normally", func(t *testing.T) {
+			build := func(bModel string) *models.AlertRule {
+				cp := models.CopyRule(rule)
+				cp.Condition = "C"
+				cp.Data = []models.AlertQuery{
+					{RefID: "A", DatasourceUID: "some-ds", Model: json.RawMessage(`{"expr":"up"}`)},
+					{RefID: "B", DatasourceUID: "some-ds", Model: json.RawMessage(bModel)},
+					{RefID: "C", DatasourceUID: expr.DatasourceUID, Model: json.RawMessage(base)},
+				}
+				return cp
+			}
+			f1 := ruleWithFolder{rule: build(`{"expr":"down"}`), folderTitle: title}.Fingerprint()
+			f2 := ruleWithFolder{rule: build(`{"expr":"different"}`), folderTitle: title}.Fingerprint()
+			require.NotEqual(t, f1, f2, "changing a non-condition query must still change the fingerprint even when the condition query is a threshold expression")
+		})
+
+		// Regression test: the single pass that builds keys for sorting and resolves the condition's
+		// threshold reference var must not stop once it finds the condition query, or every query after
+		// it in rule.Data would never get its RefID written into keys, dropping it from the hash.
+		t.Run("queries after the condition in rule.Data are still hashed", func(t *testing.T) {
+			build := func(bModel string) *models.AlertRule {
+				cp := models.CopyRule(rule)
+				cp.Condition = "C"
+				cp.Data = []models.AlertQuery{
+					{RefID: "C", DatasourceUID: expr.DatasourceUID, Model: json.RawMessage(base)},
+					{RefID: "A", DatasourceUID: "some-ds", Model: json.RawMessage(`{"expr":"up"}`)},
+					{RefID: "B", DatasourceUID: "some-ds", Model: json.RawMessage(bModel)},
+				}
+				return cp
+			}
+			f1 := ruleWithFolder{rule: build(`{"expr":"down"}`), folderTitle: title}.Fingerprint()
+			f2 := ruleWithFolder{rule: build(`{"expr":"different"}`), folderTitle: title}.Fingerprint()
+			require.NotEqual(t, f1, f2, "changing query B must still change the fingerprint even though the condition C, listed before it, is resolved first")
+		})
+	})
+
+	t.Run("all other fields should be considered", func(t *testing.T) {
+		r1 := &models.AlertRule{
+			ID:        1,
+			OrgID:     2,
+			Title:     "test",
+			Condition: "A",
+			Data: []models.AlertQuery{
+				{
+					RefID:     "1",
+					QueryType: "323",
+					RelativeTimeRange: models.RelativeTimeRange{
+						From: 1,
+						To:   2,
+					},
+					DatasourceUID: "123",
+					Model:         json.RawMessage(`{"test": "test-model"}`),
+				},
+			},
+			Updated:         time.Now(),
+			IntervalSeconds: 2,
+			Version:         1,
+			UID:             "test-uid",
+			NamespaceUID:    "test-ns",
+			DashboardUID:    func(s string) *string { return &s }("dashboard"),
+			PanelID:         func(i int64) *int64 { return &i }(123),
+			RuleGroup:       "test-group",
+			RuleGroupIndex:  1,
+			NoDataState:     "test-nodata",
+			ExecErrState:    "test-err",
+			Record:          &models.Record{Metric: "my_metric", From: "A"},
+			For:             12,
+			KeepFiringFor:   456,
+			Annotations: map[string]string{
+				"key-annotation": "value-annotation",
+			},
+			Labels: map[string]string{
+				"key-label": "value-label",
+			},
+			IsPaused:             false,
+			NotificationSettings: new(models.NotificationSettingsGen()()),
+			Metadata: models.AlertRuleMetadata{
+				EditorSettings: models.EditorSettings{
+					SimplifiedQueryAndExpressionsSection: false,
+					SimplifiedNotificationsSection:       false,
+				},
+			},
+			MissingSeriesEvalsToResolve: new(int64(2)),
+		}
+		r2 := &models.AlertRule{
+			ID:        2,
+			OrgID:     3,
+			Title:     "test-2",
+			Condition: "B",
+			Data: []models.AlertQuery{
+				{
+					RefID:     "2",
+					QueryType: "12313123",
+					RelativeTimeRange: models.RelativeTimeRange{
+						From: 2,
+						To:   3,
+					},
+					DatasourceUID: "asdasdasd21",
+					Model:         json.RawMessage(`{"test": "test-model-2"}`),
+				},
+			},
+			IntervalSeconds: 23,
+			UID:             "test-uid2",
+			NamespaceUID:    "test-ns2",
+			DashboardUID:    func(s string) *string { return &s }("dashboard-2"),
+			PanelID:         func(i int64) *int64 { return &i }(1222),
+			RuleGroup:       "test-group-2",
+			RuleGroupIndex:  22,
+			NoDataState:     "test-nodata2",
+			ExecErrState:    "test-err2",
+			Record:          &models.Record{Metric: "my_metric2", From: "B"},
+			For:             1141,
+			KeepFiringFor:   123,
+			Annotations: map[string]string{
+				"key-annotation2": "value-annotation",
+			},
+			Labels: map[string]string{
+				"key-label": "value-label23",
+			},
+			IsPaused:             true,
+			NotificationSettings: new(models.NotificationSettingsGen()()),
+			Metadata: models.AlertRuleMetadata{
+				EditorSettings: models.EditorSettings{
+					SimplifiedQueryAndExpressionsSection: true,
+				},
+			},
+			MissingSeriesEvalsToResolve: new(int64(1)),
+		}
+
+		excludedFields := map[string]struct{}{
+			"Version":         {},
+			"Updated":         {},
+			"UpdatedBy":       {},
+			"IntervalSeconds": {},
+			"Annotations":     {},
+			"ID":              {},
+			"OrgID":           {},
+			"GUID":            {},
+			"FolderFullpath":  {}, // Populated lazily from DB, not part of rule fingerprint
+			"K8sStatus":       {},
+			"RuleGroupIndex":  {},
+			// cannot change the state cache ID
+			"RuleGroup":                   {},
+			"For":                         {},
+			"Record":                      {},
+			"KeepFiringFor":               {},
+			"MissingSeriesEvalsToResolve": {},
+			"Metadata":                    {},
+		}
+
+		tp := reflect.TypeOf(rule).Elem()
+		var nonDiffFields []string
+		// making sure that we get completely different struct
+
+		dif := r1.Diff(r2)
+		nonDiffFields = make([]string, 0)
+		for field := range tp.Fields() {
+			name := field.Name
+			if _, ok := excludedFields[name]; ok {
+				continue
+			}
+			if len(dif.GetDiffsForField(field.Name)) == 0 {
+				nonDiffFields = append(nonDiffFields, field.Name)
+			}
+		}
+		require.Emptyf(t, nonDiffFields, "cannot generate completely unique alert rule. Some fields are not randomized")
+
+		f1 := ruleWithFolder{rule: r1, folderTitle: title}.Fingerprint()
+		r2v := reflect.ValueOf(r2).Elem()
+		for i := 0; i < tp.NumField(); i++ {
+			if _, ok := excludedFields[tp.Field(i).Name]; ok {
+				continue
+			}
+			cp := models.CopyRule(r1)
+			v := reflect.ValueOf(cp).Elem()
+			vf := v.Field(i)
+			vf.Set(r2v.Field(i))
+			f2 := ruleWithFolder{rule: cp, folderTitle: title}.Fingerprint()
+			if f2 == f1 {
+				t.Fatalf("Field %s does not seem to be used in fingerprint. Diff: %s", tp.Field(i).Name, r1.Diff(cp))
+			}
+		}
+	})
+}
