@@ -1,6 +1,11 @@
 name: Multilanguage pre-commit
 on:
   workflow_dispatch:
+    inputs:
+      tool:
+        type: choice
+        default: all
+        options: [all, eslint, gosec]
   push:
     branches: ['codex/grafana-eslint-validation']
   pull_request:
@@ -9,6 +14,7 @@ permissions:
   contents: read
 jobs:
   scan:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -17,12 +23,38 @@ jobs:
     env:
       SCAN_BASE_SHA: ${{ github.event.pull_request.base.sha }}
       SCAN_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      SKIP: ${{ inputs.tool == 'eslint' && 'gosec' || inputs.tool == 'gosec' && 'eslint' || '' }}
       NODE_OPTIONS: --max-old-space-size=4096
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Check private Action credential
+        env:
+          PRIVATE_ACTIONS_READ_TOKEN: ${{ secrets.PRIVATE_ACTIONS_READ_TOKEN }}
+        run: |
+          if [ -z "$PRIVATE_ACTIONS_READ_TOKEN" ]; then
+            echo 'Missing PRIVATE_ACTIONS_READ_TOKEN: configure read-only access to the two private Action repositories.'
+            exit 1
+          fi
+      - name: Checkout private pre-commit Action
+        uses: actions/checkout@v4
+        with:
+          repository: openlibing-test/pre-commit-action
+          ref: 387ad199beaa628c03ca620ea8c2512a6f9fffc0
+          token: ${{ secrets.PRIVATE_ACTIONS_READ_TOKEN }}
+          path: .private-actions/pre-commit
+          persist-credentials: false
+      - name: Checkout private upload Action
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: actions/checkout@v4
+        with:
+          repository: openlibing-test/upload-sarif-action
+          ref: 05d5ea9e9f9a76497022ccab322f6dc22d827820
+          token: ${{ secrets.PRIVATE_ACTIONS_READ_TOKEN }}
+          path: .private-actions/upload-sarif
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -38,10 +70,10 @@ jobs:
           python -m pip install pre-commit
           npm ci --prefix .github/eslint-validation --ignore-scripts --no-audit --no-fund
           mkdir -p .github/bin
-          GOBIN="$PWD/.github/bin" go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
+          if [ "$SKIP" != "gosec" ]; then GOBIN="$PWD/.github/bin" go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0; fi
       - name: Run both hooks
         id: checks
-        uses: openlibing-test/pre-commit-action@main
+        uses: ./.private-actions/pre-commit
         with:
           extra_args: ${{ github.event_name == 'pull_request' && format('--from-ref {0} --to-ref {1}', github.event.pull_request.base.sha, github.event.pull_request.head.sha) || '--all-files' }}
           report-dir: /tmp/pre-commit-reports/
@@ -55,7 +87,7 @@ jobs:
       - name: Inspect full reports
         if: ${{ always() && github.event_name != 'pull_request' }}
         run: |
-          node -e 'const fs=require("fs"); for(const t of ["gosec","eslint"]){const s=JSON.parse(fs.readFileSync(`/tmp/pre-commit-reports/${t}.sarif`)); console.log(`${t}: ${s.runs.reduce((n,r)=>n+(r.results||[]).length,0)} results`)}'
+          node -e 'const fs=require("fs"); for(const t of ["gosec","eslint"].filter(t=>t!==process.env.SKIP)){const s=JSON.parse(fs.readFileSync(`/tmp/pre-commit-reports/${t}.sarif`)); console.log(`${t}: ${s.runs.reduce((n,r)=>n+(r.results||[]).length,0)} results`)}'
       - uses: actions/upload-artifact@v4
         if: ${{ always() && github.event_name != 'pull_request' }}
         with:
@@ -63,16 +95,16 @@ jobs:
           path: /tmp/pre-commit-reports/*.sarif
           if-no-files-found: error
       - name: Upload gosec
-        if: ${{ always() && github.event_name != 'pull_request' }}
-        uses: openlibing-test/upload-sarif-action@source-platform-detection
+        if: ${{ always() && github.event_name != 'pull_request' && inputs.tool != 'eslint' }}
+        uses: ./.private-actions/upload-sarif
         with:
           sarif_file: /tmp/pre-commit-reports/gosec.sarif
           source_path: .
           env_type: beta
           category: grafana-go-root
       - name: Upload ESLint
-        if: ${{ always() && github.event_name != 'pull_request' }}
-        uses: openlibing-test/upload-sarif-action@source-platform-detection
+        if: ${{ always() && github.event_name != 'pull_request' && inputs.tool != 'gosec' }}
+        uses: ./.private-actions/upload-sarif
         with:
           sarif_file: /tmp/pre-commit-reports/eslint.sarif
           source_path: .
