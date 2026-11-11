@@ -1,11 +1,14 @@
 name: Update Schema Types
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   push:
+#     branches:
+#       - main
+#     paths:
+#       - docs/sources/developers/plugins/plugin.schema.json
+#   workflow_dispatch:
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - docs/sources/developers/plugins/plugin.schema.json
   workflow_dispatch:
 
 permissions: {}

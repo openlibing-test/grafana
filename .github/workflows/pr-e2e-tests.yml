@@ -1,11 +1,14 @@
 name: End-to-end tests
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   pull_request:
+#   push:
+#     branches:
+#       - main
+#       - release-*.*.*
 on:
-  pull_request:
-  push:
-    branches:
-      - main
-      - release-*.*.*
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ startsWith(github.ref, 'refs/pull/') && github.ref || github.sha }}

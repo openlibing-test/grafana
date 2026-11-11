@@ -2,12 +2,15 @@
 # Intended to be dropped into the base repo, Ex: grafana/grafana
 name: Dispatch sync to mirror
 run-name: dispatch-sync-to-mirror-${{ github.ref_name }}
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   workflow_dispatch:
+#   push:
+#     branches:
+#       - "main"
+#       - "release-*"
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - "main"
-      - "release-*"
 
 permissions: {}
 

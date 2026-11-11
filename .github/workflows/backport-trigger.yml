@@ -3,11 +3,14 @@
 # via workflow_run
 
 name: Backport (trigger)
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   pull_request:
+#     types:
+#       - closed
+#       - labeled
 on:
-  pull_request:
-    types:
-      - closed
-      - labeled
+  workflow_dispatch:
 
 permissions: {}
 

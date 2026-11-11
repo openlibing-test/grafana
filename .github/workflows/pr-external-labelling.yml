@@ -1,10 +1,13 @@
 name: External PR labelling
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   # We need "write" permissions on the PR to be able to add a label.
+#   pull_request:
+#     types:
+#       - opened
 on:
-  # We need "write" permissions on the PR to be able to add a label.
-  pull_request:
-    types:
-      - opened
+  workflow_dispatch:
 
 permissions: {}
 

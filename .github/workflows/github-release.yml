@@ -1,20 +1,37 @@
 name: Create or update GitHub release
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   workflow_call:
+#     inputs:
+#       version:
+#         required: true
+#         description: Needs to match, exactly, the name of a milestone (NO v prefix)
+#         type: string
+#       latest:
+#         required: false
+#         default: "0"
+#         description: Mark this release as latest (`1`) or not (`0`, default)
+#         type: string
+#       dry_run:
+#         required: false
+#         default: false
+#         type: boolean
+#   workflow_dispatch:
+#     inputs:
+#       version:
+#         required: true
+#         description: Needs to match, exactly, the name of a milestone (NO v prefix)
+#         type: string
+#       latest:
+#         required: false
+#         default: "0"
+#         description: Mark this release as latest (`1`) or not (`0`, default)
+#         type: string
+#       dry_run:
+#         required: false
+#         default: false
+#         type: boolean
 on:
-  workflow_call:
-    inputs:
-      version:
-        required: true
-        description: Needs to match, exactly, the name of a milestone (NO v prefix)
-        type: string
-      latest:
-        required: false
-        default: "0"
-        description: Mark this release as latest (`1`) or not (`0`, default)
-        type: string
-      dry_run:
-        required: false
-        default: false
-        type: boolean
   workflow_dispatch:
     inputs:
       version:

@@ -8,10 +8,13 @@ name: External PR Notify Handler
 # (team-notifications-config.json, CODEOWNERS, .agents review skills come from
 # community-triage) is resolved at this repo's root.
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   workflow_run:  # zizmor: ignore[dangerous-triggers]
+#     workflows: ["External PR Notify Trigger"]
+#     types: [completed]
 on:
-  workflow_run:  # zizmor: ignore[dangerous-triggers]
-    workflows: ["External PR Notify Trigger"]
-    types: [completed]
+  workflow_dispatch:
 
 permissions: {}
 

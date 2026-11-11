@@ -1,8 +1,11 @@
 name: "Codeowners Validator"
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   pull_request:
+#     branches: [ main ]
 on:
-  pull_request:
-    branches: [ main ]
+  workflow_dispatch:
 
 permissions: {}
 

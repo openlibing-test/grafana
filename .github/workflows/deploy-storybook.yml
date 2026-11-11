@@ -1,15 +1,23 @@
 name: Deploy Storybook
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   push:
+#     branches:
+#       - main
+#   workflow_call:
+#     inputs:
+#       version:
+#         required: true
+#         description: The version being released (with a v prefix)
+#         type: string
+#   workflow_dispatch:
+#     inputs:
+#       version:
+#         required: true
+#         description: The version being released (with a v prefix)
+#         type: string
 on:
-  push:
-    branches:
-      - main
-  workflow_call:
-    inputs:
-      version:
-        required: true
-        description: The version being released (with a v prefix)
-        type: string
   workflow_dispatch:
     inputs:
       version:
