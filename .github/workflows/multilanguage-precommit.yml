@@ -58,6 +58,16 @@ jobs:
           token: ${{ secrets.PRIVATE_ACTIONS_READ_TOKEN }}
           path: .private-actions/upload-sarif
           persist-credentials: false
+      - name: Remove private Action Git metadata
+        run: |
+          python - <<'PY'
+          import pathlib
+          import shutil
+          for name in ('pre-commit', 'upload-sarif'):
+              git_dir = pathlib.Path('.private-actions') / name / '.git'
+              if git_dir.is_dir():
+                  shutil.rmtree(git_dir)
+          PY
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
