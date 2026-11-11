@@ -7,6 +7,9 @@ name: Multilanguage pre-commit
 #   pull_request:
 #     branches: ['codex/grafana-eslint-validation']
 on:
+  pull_request:
+    branches: ['codex/grafana-eslint-validation']
+    types: [opened, synchronize]
   workflow_dispatch:
     inputs:
       tool:
