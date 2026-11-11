@@ -1,0 +1,80 @@
+name: Multilanguage pre-commit
+on:
+  workflow_dispatch:
+  push:
+    branches: ['codex/grafana-eslint-validation']
+  pull_request:
+    branches: ['codex/grafana-eslint-validation']
+permissions:
+  contents: read
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      SCAN_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      SCAN_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      NODE_OPTIONS: --max-old-space-size=4096
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Install scanners
+        run: |
+          python -m pip install pre-commit
+          npm ci --prefix .github/eslint-validation --ignore-scripts --no-audit --no-fund
+          mkdir -p .github/bin
+          GOBIN="$PWD/.github/bin" go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
+      - name: Run both hooks
+        id: checks
+        uses: openlibing-test/pre-commit-action@main
+        with:
+          extra_args: ${{ github.event_name == 'pull_request' && format('--from-ref {0} --to-ref {1}', github.event.pull_request.base.sha, github.event.pull_request.head.sha) || '--all-files' }}
+          report-dir: /tmp/pre-commit-reports/
+      - name: Assert PR produced no reports
+        if: ${{ always() && github.event_name == 'pull_request' }}
+        run: |
+          if find /tmp/pre-commit-reports -name '*.sarif' -print -quit 2>/dev/null | grep -q .; then
+            echo 'Unexpected SARIF in PR gate'; exit 1
+          fi
+          echo 'PR gate: no SARIF generated; upload steps excluded by event condition'
+      - name: Inspect full reports
+        if: ${{ always() && github.event_name != 'pull_request' }}
+        run: |
+          node -e 'const fs=require("fs"); for(const t of ["gosec","eslint"]){const s=JSON.parse(fs.readFileSync(`/tmp/pre-commit-reports/${t}.sarif`)); console.log(`${t}: ${s.runs.reduce((n,r)=>n+(r.results||[]).length,0)} results`)}'
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() && github.event_name != 'pull_request' }}
+        with:
+          name: multilanguage-sarif
+          path: /tmp/pre-commit-reports/*.sarif
+          if-no-files-found: error
+      - name: Upload gosec
+        if: ${{ always() && github.event_name != 'pull_request' }}
+        uses: openlibing-test/upload-sarif-action@source-platform-detection
+        with:
+          sarif_file: /tmp/pre-commit-reports/gosec.sarif
+          source_path: .
+          env_type: beta
+          category: grafana-go-root
+      - name: Upload ESLint
+        if: ${{ always() && github.event_name != 'pull_request' }}
+        uses: openlibing-test/upload-sarif-action@source-platform-detection
+        with:
+          sarif_file: /tmp/pre-commit-reports/eslint.sarif
+          source_path: .
+          env_type: beta
+          category: grafana-typescript
