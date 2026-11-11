@@ -1,11 +1,14 @@
 name: Auto-milestone
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   pull_request_target:  # zizmor: ignore[dangerous-triggers] action uses GITHUB_TOKEN only, does not check out fork code
+#     types:
+#       - opened
+#       - reopened
+#       - closed
+#       - ready_for_review
 on:
-  pull_request_target:  # zizmor: ignore[dangerous-triggers] action uses GITHUB_TOKEN only, does not check out fork code
-    types:
-      - opened
-      - reopened
-      - closed
-      - ready_for_review
+  workflow_dispatch:
 
 permissions: {}
 

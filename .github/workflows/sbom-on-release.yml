@@ -5,17 +5,29 @@ name: "SBOM on Release"
 # by the default GITHUB_TOKEN. That native trigger silently never fired for releases created
 # by the automated pipeline, so release-comms.yml calls this explicitly once its
 # create_github_release job has completed.
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   workflow_call:
+#     inputs:
+#       version:
+#         required: true
+#         description: The version being released, with or without a leading `v` (e.g. 11.2.3 or v11.2.3)
+#         type: string
+#       dry_run:
+#         required: false
+#         default: false
+#         type: boolean
+#   workflow_dispatch:
+#     inputs:
+#       version:
+#         required: true
+#         description: The version being released, with or without a leading `v` (e.g. 11.2.3 or v11.2.3)
+#         type: string
+#       dry_run:
+#         required: false
+#         default: false
+#         type: boolean
 on:
-  workflow_call:
-    inputs:
-      version:
-        required: true
-        description: The version being released, with or without a leading `v` (e.g. 11.2.3 or v11.2.3)
-        type: string
-      dry_run:
-        required: false
-        default: false
-        type: boolean
   workflow_dispatch:
     inputs:
       version:

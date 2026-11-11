@@ -1,11 +1,14 @@
 name: Direct Go Resource Search Result Format
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   pull_request:
+#     paths:
+#       - '**/*.go'
+#       - 'pkg/storage/unified/semgrep/**'
+#       - '.github/workflows/pr-resource-search-result-format.yml'
 on:
-  pull_request:
-    paths:
-      - '**/*.go'
-      - 'pkg/storage/unified/semgrep/**'
-      - '.github/workflows/pr-resource-search-result-format.yml'
+  workflow_dispatch:
 
 permissions:
   contents: read

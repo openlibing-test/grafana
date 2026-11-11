@@ -1,16 +1,19 @@
 name: Check Frontend Test Coverage
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   pull_request:
+#     branches: [main]
+#     types: [opened, synchronize, reopened, labeled, unlabeled]
+#     paths:
+#       - '**/*.js'
+#       - '**/*.jsx'
+#       - '**/*.ts'
+#       - '**/*.tsx'
+#       - 'package.json'
+#       - '.github/CODEOWNERS'
 on:
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened, labeled, unlabeled]
-    paths:
-      - '**/*.js'
-      - '**/*.jsx'
-      - '**/*.ts'
-      - '**/*.tsx'
-      - 'package.json'
-      - '.github/CODEOWNERS'
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

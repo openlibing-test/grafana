@@ -1,21 +1,24 @@
 name: Policybot
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   push:
+#     paths:
+#       - .policy.yml
+#       - .policy.yml.tmpl
+#       - justfile
+#       - .github/workflows/*
+#     branches:
+#       - main
+#   pull_request:
+#     paths:
+#       - .policy.yml
+#       - .policy.yml.tmpl
+#       - justfile
+#       - .github/workflows/*
+#     branches:
+#       - main
 on:
-  push:
-    paths:
-      - .policy.yml
-      - .policy.yml.tmpl
-      - justfile
-      - .github/workflows/*
-    branches:
-      - main
-  pull_request:
-    paths:
-      - .policy.yml
-      - .policy.yml.tmpl
-      - justfile
-      - .github/workflows/*
-    branches:
-      - main
+  workflow_dispatch:
 
 permissions: {}
 

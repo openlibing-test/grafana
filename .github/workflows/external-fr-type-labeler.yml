@@ -1,8 +1,11 @@
 name: Label Enhancement issues
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   issues:
+#     types: [typed, opened]
 on:
-  issues:
-    types: [typed, opened]
+  workflow_dispatch:
 
 permissions: {}
 

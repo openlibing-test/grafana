@@ -1,7 +1,10 @@
 name: When an issue changes and it's part of the dashboards project, add the dashboards squad label
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   issues:
+#     types: [opened, closed, edited, reopened, assigned, unassigned, labeled, unlabeled]
 on:
-  issues:
-    types: [opened, closed, edited, reopened, assigned, unassigned, labeled, unlabeled]
+  workflow_dispatch:
 
 permissions: {}
 

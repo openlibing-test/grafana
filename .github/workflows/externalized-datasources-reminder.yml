@@ -1,11 +1,14 @@
 name: Externalized Data Sources Reminder
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   pull_request:
+#     types: [opened]
+#     paths:
+#       - "public/app/plugins/datasource/graphite/**"
+#       - "pkg/tsdb/graphite/**"
 on:
-  pull_request:
-    types: [opened]
-    paths:
-      - "public/app/plugins/datasource/graphite/**"
-      - "pkg/tsdb/graphite/**"
+  workflow_dispatch:
 
 jobs:
   add-comment:
