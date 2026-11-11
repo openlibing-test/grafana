@@ -1,8 +1,11 @@
 name: Documentation CI
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   pull_request:
+#     branches: ["main"]
+#     paths: ["docs/sources/**"]
+#   workflow_dispatch:
 on:
-  pull_request:
-    branches: ["main"]
-    paths: ["docs/sources/**"]
   workflow_dispatch:
 
 concurrency:

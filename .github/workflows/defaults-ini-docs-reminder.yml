@@ -1,9 +1,12 @@
 name: Remind about config documentation updates
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   pull_request:
+#     types: [opened]
+#     paths:
+#       - 'conf/defaults.ini'
 on:
-  pull_request:
-    types: [opened]
-    paths:
-      - 'conf/defaults.ini'
+  workflow_dispatch:
 
 jobs:
   add-comment:

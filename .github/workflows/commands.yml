@@ -1,10 +1,13 @@
 name: Run commands when issues are labeled or comments added
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   issues:
+#     types: [labeled, unlabeled]
+#   issue_comment:
+#     types: [created]
 on:
-  issues:
-    types: [labeled, unlabeled]
-  issue_comment:
-    types: [created]
+  workflow_dispatch:
 
 concurrency:
   group: issue-commands-${{ github.event.issue.number }}

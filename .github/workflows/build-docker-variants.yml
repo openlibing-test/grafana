@@ -7,48 +7,51 @@ name: Build Docker Variants
 # Called from release-build.yml (once per arch, tarball from build-targz) and
 # from pr-build-grafana.yml (amd64 only, tarball built from source in the PR).
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   workflow_call:
+#     inputs:
+#       targz-artifact-name:
+#         description: Name of the Actions artifact containing the source tarball
+#         type: string
+#         required: true
+#       name:
+#         description: Arch label used in artifact names, e.g. "linux-amd64"
+#         type: string
+#         required: true
+#       os:
+#         type: string
+#         required: false
+#         default: linux
+#       arch:
+#         type: string
+#         required: false
+#         default: amd64
+#       arch-tag:
+#         type: string
+#         required: false
+#         default: amd64
+#       arm:
+#         type: string
+#         required: false
+#         default: ''
+#       version:
+#         type: string
+#         required: false
+#         default: '0.0.0-dev'
+#       build-number:
+#         type: string
+#         required: false
+#         default: '0'
+#       tag-prefix:
+#         description: >
+#           Docker image tag prefix, e.g. "grafana/grafana-image-tags:".
+#           Leave empty to skip tagging (useful in PR builds).
+#         type: string
+#         required: false
+#         default: ''
 on:
-  workflow_call:
-    inputs:
-      targz-artifact-name:
-        description: Name of the Actions artifact containing the source tarball
-        type: string
-        required: true
-      name:
-        description: Arch label used in artifact names, e.g. "linux-amd64"
-        type: string
-        required: true
-      os:
-        type: string
-        required: false
-        default: linux
-      arch:
-        type: string
-        required: false
-        default: amd64
-      arch-tag:
-        type: string
-        required: false
-        default: amd64
-      arm:
-        type: string
-        required: false
-        default: ''
-      version:
-        type: string
-        required: false
-        default: '0.0.0-dev'
-      build-number:
-        type: string
-        required: false
-        default: '0'
-      tag-prefix:
-        description: >
-          Docker image tag prefix, e.g. "grafana/grafana-image-tags:".
-          Leave empty to skip tagging (useful in PR builds).
-        type: string
-        required: false
-        default: ''
+  workflow_dispatch:
 
 jobs:
   build:

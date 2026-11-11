@@ -1,15 +1,13 @@
 name: Multilanguage pre-commit
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   workflow_dispatch:
+#   push:
+#     branches: ['codex/grafana-eslint-validation']
+#   pull_request:
+#     branches: ['codex/grafana-eslint-validation']
 on:
   workflow_dispatch:
-    inputs:
-      tool:
-        type: choice
-        default: all
-        options: [all, eslint, gosec]
-  push:
-    branches: ['codex/grafana-eslint-validation']
-  pull_request:
-    branches: ['codex/grafana-eslint-validation']
 permissions:
   contents: read
 jobs:

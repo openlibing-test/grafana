@@ -1,14 +1,17 @@
 name: golangci-lint
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   push:
+#     paths:
+#       - pkg/**
+#       - .github/workflows/go-lint.yml
+#       - .golangci.yml
+#       - go.*
+#     branches:
+#       - main
+#   pull_request:
 on:
-  push:
-    paths:
-      - pkg/**
-      - .github/workflows/go-lint.yml
-      - .golangci.yml
-      - go.*
-    branches:
-      - main
-  pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

@@ -1,20 +1,23 @@
 name: govulncheck
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   push:
+#     paths:
+#       - '**/*.go'
+#       - .github/workflows/govulncheck.yml
+#       - .citools/src/govulncheck/**
+#       - go.*
+#     branches:
+#       - main
+#   pull_request:
+#     paths:
+#       - '**/*.go'
+#       - .github/workflows/govulncheck.yml
+#       - .citools/src/govulncheck/**
+#       - go.*
 on:
-  push:
-    paths:
-      - '**/*.go'
-      - .github/workflows/govulncheck.yml
-      - .citools/src/govulncheck/**
-      - go.*
-    branches:
-      - main
-  pull_request:
-    paths:
-      - '**/*.go'
-      - .github/workflows/govulncheck.yml
-      - .citools/src/govulncheck/**
-      - go.*
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

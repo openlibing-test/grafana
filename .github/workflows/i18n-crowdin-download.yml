@@ -1,9 +1,12 @@
 name: Crowdin Download Action
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   workflow_dispatch:
+#   schedule:
+#     - cron: "0 0 * * *"
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 0 * * *"
 
 jobs:
   download-sources-from-crowdin:

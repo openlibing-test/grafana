@@ -2,30 +2,33 @@
 # incoming pull requests are able to be compiled for all supported architectures and operating systems.
 name: Build Go (matrix)
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   pull_request:
+#     paths:
+#       - '**/go.mod'
+#       - '**/go.sum'
+#       - '**/go.work'
+#       - '**/go.work.sum'
+#       - '**.go'
+#       - 'pkg/**'
+#       - 'apps/**'
+#       - Makefile
+#       - packaging/**
+#       - scripts/build-rpm.sh
+#       - scripts/build-deb.sh
+#       - scripts/build-targz.sh
+#       - scripts/verify-pkg-stig.sh
+#       - .github/actions/setup-go/**
+#       - .github/actions/setup-fpm/**
+#       - .github/actions/setup-enterprise/**
+#       - .github/workflows/build-go-matrix.yml
+#   push:
+#     branches:
+#       - main
+#       - release-*.*.*
 on:
-  pull_request:
-    paths:
-      - '**/go.mod'
-      - '**/go.sum'
-      - '**/go.work'
-      - '**/go.work.sum'
-      - '**.go'
-      - 'pkg/**'
-      - 'apps/**'
-      - Makefile
-      - packaging/**
-      - scripts/build-rpm.sh
-      - scripts/build-deb.sh
-      - scripts/build-targz.sh
-      - scripts/verify-pkg-stig.sh
-      - .github/actions/setup-go/**
-      - .github/actions/setup-fpm/**
-      - .github/actions/setup-enterprise/**
-      - .github/workflows/build-go-matrix.yml
-  push:
-    branches:
-      - main
-      - release-*.*.*
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

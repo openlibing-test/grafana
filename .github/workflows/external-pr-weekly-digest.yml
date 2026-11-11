@@ -5,9 +5,28 @@ name: External PR Weekly Digest
 # ./community-triage/, and runs the digest from there. The consumer repo source
 # is mounted into the Oz container as /repo; config is resolved at the root.
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   schedule:
+#     - cron: '0 9 * * 1'
+#   workflow_dispatch:
+#     inputs:
+#       stale_days:
+#         description: 'Number of days without activity to consider PR stale'
+#         required: false
+#         type: number
+#         default: 30
+#       dry_run:
+#         description: 'Dry run mode (print report but skip Slack notification)'
+#         required: false
+#         type: boolean
+#         default: false
+#       team_filter:
+#         description: 'Filter to specific team (leave empty for all)'
+#         required: false
+#         type: string
+#         default: ''
 on:
-  schedule:
-    - cron: '0 9 * * 1'
   workflow_dispatch:
     inputs:
       stale_days:

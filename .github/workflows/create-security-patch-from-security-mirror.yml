@@ -2,25 +2,28 @@
 # Intended to be dropped into the base repo (Ex: grafana/grafana) for use in the security mirror.
 name: Create security patch
 run-name: create-security-patch
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   pull_request:
+#     types:
+#       - opened
+#       - reopened
+#       - synchronize
+#       # edited (title/description) and (un)labeled (VUL ID / backport targets) regenerate
+#       # the patch so the patch repo stays in sync with the mirror PR.
+#       - edited
+#       - labeled
+#       - unlabeled
+#     branches:
+#       - "main"
+#       - "v*.*.*"
+#       - "release-*.*.*"
+#       # Vendor-targeting patches: authors PR against "<branch>#vendor" (published by
+#       # security-patch-actions alongside "<branch>#patched") to modify a vendored dependency
+#       # directly. "#" is not a path separator, so this also matches "release-*.*.*#vendor" etc.
+#       - "*#vendor"
 on:
-  pull_request:
-    types:
-      - opened
-      - reopened
-      - synchronize
-      # edited (title/description) and (un)labeled (VUL ID / backport targets) regenerate
-      # the patch so the patch repo stays in sync with the mirror PR.
-      - edited
-      - labeled
-      - unlabeled
-    branches:
-      - "main"
-      - "v*.*.*"
-      - "release-*.*.*"
-      # Vendor-targeting patches: authors PR against "<branch>#vendor" (published by
-      # security-patch-actions alongside "<branch>#patched") to modify a vendored dependency
-      # directly. "#" is not a path separator, so this also matches "release-*.*.*#vendor" etc.
-      - "*#vendor"
+  workflow_dispatch:
 
 concurrency:
   group: create-patch-${{ github.ref }}

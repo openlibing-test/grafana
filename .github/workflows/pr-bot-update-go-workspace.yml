@@ -1,16 +1,19 @@
 name: "Update Go Workspace for Bot PRs"
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   pull_request:
+#     branches: [main]
+#     paths:
+#       - .github/workflows/pr-bot-update-go-workspace.yml
+#       - go.mod
+#       - go.sum
+#       - go.work
+#       - go.work.sum
+#       - '**/go.mod'
+#       - '**/go.sum'
+#       - '**.go'
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - .github/workflows/pr-bot-update-go-workspace.yml
-      - go.mod
-      - go.sum
-      - go.work
-      - go.work.sum
-      - '**/go.mod'
-      - '**/go.sum'
-      - '**.go'
+  workflow_dispatch:
 permissions: {}
 jobs:
   update:

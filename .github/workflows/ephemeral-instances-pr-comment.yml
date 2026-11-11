@@ -1,10 +1,13 @@
 name: "Ephemeral instances"
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   issue_comment:
+#     types: [created]
+#   pull_request:
+#     types: [closed]
 on:
-  issue_comment:
-    types: [created]
-  pull_request:
-    types: [closed]
+  workflow_dispatch:
 
 permissions: {}
 

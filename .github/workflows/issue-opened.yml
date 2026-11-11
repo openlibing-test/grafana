@@ -3,9 +3,18 @@ name: Run commands when issues are opened
 # important: this workflow uses a github app that is strictly limited
 # to issues. If you want to change the triggers for this workflow,
 # please review if the permissions are still sufficient.
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   issues:
+#     types: [opened]
+#   workflow_dispatch:
+#     inputs:
+#       limit:
+#         description: "Max number of unlabeled open issues to triage (keep small to avoid rate limits)"
+#         required: false
+#         default: "10"
+#         type: string
 on:
-  issues:
-    types: [opened]
   workflow_dispatch:
     inputs:
       limit:

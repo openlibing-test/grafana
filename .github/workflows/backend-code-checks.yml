@@ -1,18 +1,21 @@
 name: Backend Code Checks
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   pull_request:
+#     paths-ignore:
+#       - '*.md'
+#       - 'docs/**'
+#       - 'latest.json'
+#   push:
+#     branches:
+#       - main
+#     paths-ignore:
+#       - '*.md'
+#       - 'docs/**'
+#       - 'latest.json'
 on:
-  pull_request:
-    paths-ignore:
-      - '*.md'
-      - 'docs/**'
-      - 'latest.json'
-  push:
-    branches:
-      - main
-    paths-ignore:
-      - '*.md'
-      - 'docs/**'
-      - 'latest.json'
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

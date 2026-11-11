@@ -1,11 +1,14 @@
 name: Modowners reviewers
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   pull_request:
+#     paths:
+#       - go.mod
+#       - scripts/modowners/**
+#       - .github/workflows/modowners-reviewers.yml
 on:
-  pull_request:
-    paths:
-      - go.mod
-      - scripts/modowners/**
-      - .github/workflows/modowners-reviewers.yml
+  workflow_dispatch:
 
 permissions: {}
 

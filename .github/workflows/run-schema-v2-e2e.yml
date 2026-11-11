@@ -1,12 +1,15 @@
 name: Run dashboard schema v2 e2e
 
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   push:
+#     branches:
+#       - main
+#   pull_request:
+#     branches:
+#       - '**'
 on:
-  push:
-    branches:
-      - main
-  pull_request:
-    branches:
-      - '**'
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

@@ -4,17 +4,20 @@ name: Diagnostics e2e (on-prem)
 # run-playwright-tests's shared server sets stack_id = 12345 for K8s dashboard RBAC checks other
 # suites depend on -- the two requirements can't share one server. So this boots its own on-prem
 # instance, reusing the same build-backend/build-frontend artifacts rather than rebuilding them.
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   workflow_call:
+#     inputs:
+#       backend-artifact-name:
+#         description: Name of the Actions artifact containing the built backend (bin/)
+#         type: string
+#         required: true
+#       frontend-artifact-name:
+#         description: Name of the Actions artifact containing the built frontend (public/)
+#         type: string
+#         required: true
 on:
-  workflow_call:
-    inputs:
-      backend-artifact-name:
-        description: Name of the Actions artifact containing the built backend (bin/)
-        type: string
-        required: true
-      frontend-artifact-name:
-        description: Name of the Actions artifact containing the built frontend (public/)
-        type: string
-        required: true
+  workflow_dispatch:
 
 permissions: {}
 

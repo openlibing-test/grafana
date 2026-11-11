@@ -1,7 +1,10 @@
 name: PR Checks
+# Original triggers preserved; manual-only for test cost control.
+# on:
+#   pull_request:
+#     types: [opened, synchronize, reopened, labeled, unlabeled]
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+  workflow_dispatch:
 
 concurrency:
   group: pr-checks-${{ github.event.number }}-new
